@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Field-Insight MVP-1 — 현장 이슈 접수·AI 구조화·전문가 판단·회신 루프</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Field-Insight <small>MVP-1 · 정비 도메인</small></h1>
+    <div class="mode-toggle" role="group" aria-label="화면 모드 전환(user.roles[])">
+      <button id="mode-reporter" type="button">접수자</button>
+      <button id="mode-expert" type="button">전문가</button>
+    </div>
+    <button id="btn-load-seed" class="util" type="button" title="원문 15장 ISSUE #1024 시나리오를 IN_REVIEW 상태로 로드">시드 데모</button>
+    <button id="btn-reset" class="util" type="button" title="LocalStorage 초기화">초기화</button>
+  </header>
+
+  <main id="root" aria-live="polite"></main>
+
+  <!-- 스키마(SSOT: schema/*.json → tools/build-schema-bundle.js 로 번들) -->
+  <script src="schema.bundle.js"></script>
+  <!-- Mock AI Rule Engine (Phase 2에서 LLM 어댑터 구현체만 교체) -->
+  <script src="../engine/confidence.js"></script>
+  <script src="../engine/intent.js"></script>
+  <script src="../engine/gap.js"></script>
+  <script src="../engine/question.js"></script>
+  <script src="../engine/statemachine.js"></script>
+  <script src="../engine/mockai.js"></script>
+  <!-- 시드: 원문 15장 End-to-End 시나리오 (ISSUE #1024) -->
+  <script src="../seed/issue1024.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
