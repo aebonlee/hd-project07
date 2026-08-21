@@ -468,9 +468,217 @@
       '</section>';
   }
 
-  /* ── E-02~E-05 이슈 상세 (다음 단계에서 구현) ── */
+  /* ── E-02~E-05 이슈 상세 (근거 점프 · AI 분석 · 구조화 결론 · 승인) ── */
   function viewEDetail() {
-    return '<section class="card"><h2>이슈 상세</h2><p class="muted">전문가 상세 화면(E-02~05)은 다음 커밋에서 제공됩니다.</p></section>';
+    var issue = getIssue(state.current);
+    if (!issue) { state.view = "e01"; return viewE01(); }
+    var scenario = scenarioOf(issue);
+    var g = E.gap.analyze(MNT, scenario, issue.collected);
+
+    var html = '<button class="back" data-action="go-e01">← My Queue</button>';
+
+    /* E-02: 정형화 결과 + 원본 근거 점프 */
+    var rows = g.rows.filter(function (r) { return r.requirement_id !== "MNT-12"; }).map(function (r) {
+      var c = r.item;
+      var val, evi = "—";
+      if (c && c.value_state === "known") {
+        val = esc(c.value);
+        var ref = c.evidence_ref || {};
+        if (ref.input_id) {
+          evi = '<button class="evi evidence-link" data-action="jump" data-input="' + esc(ref.input_id) + '" data-start="' + ref.start + '" data-end="' + ref.end + '">📄 원문 ' + ref.start + '–' + ref.end + '</button>';
+        } else if (ref.type === "answer") {
+          evi = '<span class="evi">💬 ' + esc((ref.question_id || "").split("-")[0] || "질문") + ' 응답</span>';
+        } else if (ref.type === "system") {
+          evi = '<span class="evi">⚙ 시스템 획득</span>';
+        }
+        if (c.source_type === "answered" && c.confirmed) val += ' <span class="sr">(고객 확인됨)</span>';
+      } else if (c && c.value_state === "unknown") {
+        val = '<span class="value-missing">모르겠음(unknown)</span>';
+      } else if (c && c.value_state === "skipped") {
+        val = '<span class="value-missing">건너뜀(skipped)</span>';
+      } else {
+        val = '<span class="value-missing">' + (r.ask_policy === "expert_check" ? "미확보 (계측 필요)" : "미확보") + '</span>';
+      }
+      return '<tr><td class="k">' + esc(r.label) + '</td><td>' + val + '</td><td style="text-align:right">' + evi + '</td></tr>';
+    }).join("");
+
+    var originalHtml = esc(issue.user_input.original_text);
+    if (state.hl && state.hl.input_id === issue.user_input.input_id) {
+      var t = issue.user_input.original_text;
+      originalHtml = esc(t.slice(0, state.hl.start)) +
+        '<mark class="hl">' + esc(t.slice(state.hl.start, state.hl.end)) + '</mark>' +
+        esc(t.slice(state.hl.end));
+    }
+
+    html += '<section class="card" id="issue-detail">' +
+      '<h2>ISSUE #' + issue.issue_id + ' <span class="badge b-' + issue.status + '" id="edetail-status">' + esc(E.statemachine.LABELS[issue.status]) + '</span></h2>' +
+      '<p class="muted">정비 · ' + esc(issue.safety_level) + ' · ' + esc(eqLabel(issue.equipment_ref)) + ' · ' + fmt(issue.created_at) + ' · 정보충분도 ' + Math.round(g.sufficiency * 100) + '%</p>' +
+      '<h3>정형화 결과 <span class="sr">(E-02 · 근거 클릭 시 원문 하이라이트)</span></h3>' +
+      '<table class="fields">' + rows + '</table>' +
+      ((issue.expert_checks || []).length ?
+        '<p class="notice" style="margin-top:10px">🔧 전문가 추가 확인 항목: ' +
+        esc(issue.expert_checks.map(function (c) { return c.label; }).join(", ")) +
+        ' <span class="sr">(획득가능성 ‘하’ — 고객에게 묻지 않음)</span></p>' : "") +
+      '<h3>고객 원문</h3>' +
+      '<div class="origin" id="original-text">“' + originalHtml + '”</div>' +
+      (issue.pending_request && issue.pending_request.reply ?
+        '<h3>현장 확인 회신</h3><div class="origin">“' + esc(issue.pending_request.reply) + '”</div>' : "") +
+      '</section>';
+
+    /* E-03: Mock AI 분석 */
+    html += '<section class="card" id="ai-section"><h3>AI 1차 분석 <span class="sr">(E-03 · Mock Rule Engine)</span></h3>';
+    if (!issue.ai_analysis) {
+      html += '<p class="muted">표준·매뉴얼·과거사례(Mock 저장소)를 근거로 A/B/C/D 판정을 제시합니다.</p>' +
+        '<button class="primary" id="btn-run-ai" data-action="run-ai">AI 분석 실행</button>';
+    } else {
+      var a = issue.ai_analysis;
+      html += '<div id="ai-result">' +
+        '<span class="verdict v' + a.verdict + '">판정 ' + a.verdict + ' — ' + esc(a.verdict_label) + '</span>' +
+        '<p>' + esc(a.recommendation) + '</p>' +
+        (a.similar_cases || []).map(function (c) {
+          return '<div class="simcase">🔗 <b>' + esc(c.case_id) + '</b> (' + Math.round(c.similarity * 100) + '%) ' + esc(c.title) +
+            '<br><span class="muted">' + esc(c.resolution) + '</span></div>';
+        }).join("") +
+        (a.related_documents || []).map(function (dcm) {
+          return '<div class="simcase">📘 <b>' + esc(dcm.doc_id) + '</b> ' + esc(dcm.title) + '</div>';
+        }).join("") +
+        ((a.evidence || []).length ? '<p class="muted">근거: ' + esc(a.evidence.join(" / ")) + '</p>' : "") +
+        '<div class="limbox">⚠ ' + esc(a.limitations) + '</div>';
+      if (a.verdict === "D" && issue.status === "IN_REVIEW") {
+        html += '<p class="muted" style="margin-top:8px">추가 필요 정보: ' + esc((a.missing_info || []).join(", ")) + '</p>' +
+          '<button class="primary" id="btn-request-field" data-action="request-field">고객에게 추가 확인 요청</button>';
+      }
+      html += '</div>';
+    }
+    html += '</section>';
+
+    /* E-04: 구조화 결론 (자유 서술 → AI 초안 → 4필드) */
+    var opinionDone = !!issue.expert_opinion;
+    var canConclude = issue.status === "IN_REVIEW";
+    if (opinionDone) {
+      var op = issue.expert_opinion;
+      html += '<section class="card" id="opinion-section"><h3>구조화 결론 (확정) <span class="sr">(E-04)</span></h3>' +
+        '<table class="fields">' +
+        '<tr><td class="k">확정 원인</td><td id="final-cause">' +
+        (op.cause_undetermined
+          ? '원인 미확정 · 사유: ' + esc(op.cause_undetermined_reason_label || op.cause_undetermined_reason)
+          : esc(op.cause_system_label) + ' / ' + esc(op.cause_part_label) + ' <span class="code-chip">' + esc(op.cause_part_code) + '</span>') +
+        '</td></tr>' +
+        '<tr><td class="k">조치 내용</td><td>' + esc(op.action_detail) + ' <span class="badge">' + esc(op.action_type) + '</span></td></tr>' +
+        '<tr><td class="k">판단 근거</td><td>' + esc((op.rationale_refs || []).join(" · ")) + (op.rationale_text ? '<br><span class="muted">' + esc(op.rationale_text) + '</span>' : "") + '</td></tr>' +
+        '<tr><td class="k">재발 방지</td><td>' + esc(op.prevention || "—") + '</td></tr>' +
+        '</table><p class="muted">확정 ' + fmt(op.finalized_at) + '</p></section>';
+    } else if (canConclude) {
+      html += viewE04Form(issue);
+    } else {
+      html += '<section class="card section-disabled"><h3>구조화 결론 <span class="sr">(E-04)</span></h3>' +
+        '<p class="muted">검토 중(IN_REVIEW) 상태에서 입력할 수 있습니다.</p></section>';
+    }
+
+    /* E-05: 고객 답변 승인 */
+    if (issue.customer_response) {
+      html += '<section class="card"><h3>고객 회신 (발송 완료) <span class="sr">(E-05)</span></h3>' +
+        '<div class="compare">' +
+        '<div class="pane"><h4>전문가 원본</h4>' + esc(issue.customer_response.technical_original) + '</div>' +
+        '<div class="pane"><h4>고객용 재작성 (발송본)</h4>' + esc(issue.customer_response.simplified_response) + '</div>' +
+        '</div><p class="muted">승인 ' + esc(issue.customer_response.approved_by) + ' · ' + fmt(issue.customer_response.approved_at) + '</p></section>';
+    } else if (opinionDone && issue.status === "IN_REVIEW") {
+      var tech = issue.expert_opinion.original_text || issue.expert_opinion.rationale_text || "";
+      if (state.rewriteText == null) state.rewriteText = adapter.rewriteForCustomer(tech);
+      html += '<section class="card" id="approval-view"><h3>고객 답변 승인 <span class="sr">(E-05 · 발송 전 1-click 승인 게이트)</span></h3>' +
+        '<div class="compare">' +
+        '<div class="pane"><h4>전문가 원본 (불변 저장)</h4><span id="tech-original">' + esc(tech) + '</span></div>' +
+        '<div class="pane"><h4>AI 고객용 재작성 (치환 템플릿)</h4>' +
+        '<textarea id="customer-rewrite">' + esc(state.rewriteText) + '</textarea>' +
+        '<p class="muted">[수정]: 위 텍스트를 직접 편집하세요. 전문가 원본은 덮어쓰지 않습니다.</p></div>' +
+        '</div>' +
+        '<button class="primary" id="btn-approve-send" data-action="approve-send">승인 후 발송</button>' +
+        '</section>';
+    }
+
+    /* 감사 이력 (FR-25) */
+    html += '<section class="card"><h3>감사 이력 <span class="sr">(FR-25 · append-only)</span></h3><div class="audit" id="audit-trail">' +
+      issue.audit.map(function (a) {
+        var d = a.detail ? (a.detail.from ? a.detail.from + " → " + a.detail.to + (a.detail.note ? " (" + a.detail.note + ")" : "") : JSON.stringify(a.detail)) : "";
+        return '<div>#' + a.seq + ' · ' + fmt(a.ts) + ' · ' + esc(a.actor) + ' · ' + esc(a.event) + ' ' + esc(d) + '</div>';
+      }).join("") +
+      '</div></section>';
+
+    return html;
+  }
+
+  /** E-04 입력 폼 */
+  function viewE04Form(issue) {
+    var f = state.opinionForm || (state.opinionForm = {
+      free_text: "", part_code: null, undetermined: false, reason: "",
+      action_type: "", action_detail: "", refs: {}, rationale_text: "", prevention: ""
+    });
+    var selectedPart = f.part_code ? S.parts.parts.filter(function (p) { return p.part_code === f.part_code; })[0] : null;
+    var selectedSystem = selectedPart ? S.parts.systems.filter(function (s) { return s.system_code === selectedPart.system_code; })[0] : null;
+
+    var q = (state.partQuery || "").trim();
+    var results = "";
+    if (q) {
+      var found = S.parts.parts.filter(function (p) {
+        var sys = S.parts.systems.filter(function (s) { return s.system_code === p.system_code; })[0];
+        var hay = p.part_code + " " + p.label + " " + (sys ? sys.label + " " + sys.group : "");
+        return hay.toLowerCase().indexOf(q.toLowerCase()) >= 0;
+      }).slice(0, 8);
+      results = '<div class="part-results">' +
+        (found.length ? found.map(function (p) {
+          var sys = S.parts.systems.filter(function (s) { return s.system_code === p.system_code; })[0];
+          return '<button class="part-result" data-action="pick-part" data-code="' + esc(p.part_code) + '">' +
+            '<b>' + esc(p.part_code) + '</b> ' + esc(p.label) + ' <span class="muted">(' + esc(sys ? sys.label : "") + ')</span></button>';
+        }).join("") : '<p class="muted" style="padding:10px">검색 결과 없음 — 코드가 없으면 ‘원인 미확정’으로 종결하세요.</p>') +
+        '</div>';
+    }
+
+    var aiRefs = [];
+    if (issue.ai_analysis) {
+      (issue.ai_analysis.similar_cases || []).forEach(function (c) { aiRefs.push(c.case_id); });
+      (issue.ai_analysis.related_documents || []).forEach(function (d) { aiRefs.push(d.doc_id); });
+    }
+    aiRefs.push("전문가 경험");
+    var refChecks = aiRefs.map(function (r) {
+      return '<label class="check-row"><input type="checkbox" class="rationale-check" data-ref="' + esc(r) + '"' + (f.refs[r] ? " checked" : "") + '> ' + esc(r) + '</label>';
+    }).join("");
+
+    var reasons = S.undetermined.reasons.map(function (r) {
+      return '<option value="' + esc(r.code) + '"' + (f.reason === r.code ? " selected" : "") + '>' + esc(r.label) + '</option>';
+    }).join("");
+
+    return '' +
+      '<section class="card" id="opinion-section"><h3>구조화 결론 입력 <span class="sr">(E-04 · 자유 서술 → AI 4필드 초안 → 확정)</span></h3>' +
+      '<label class="fld" for="expert-free-text">자유 서술 (음성 대신 텍스트, DP-6)</label>' +
+      '<textarea id="expert-free-text" placeholder="예) 유압 오일 온도가 낮은 상태에서 선회 압력이 순간적으로 상승해서 발생하는 현상으로 판단됩니다. 예열 후 재현 확인하고 미재현 시 정상 판정하면 됩니다. 동절기 예열 절차 안내가 필요합니다.">' + esc(f.free_text) + '</textarea>' +
+      '<button class="ghost" id="btn-ai-draft" data-action="ai-draft" style="margin-top:10px;width:100%">AI 초안 생성</button>' +
+
+      '<h3>① 확정 원인 <span class="sr">*필수 · 계통/부품 코드 마스터 선택(자유 텍스트 금지)</span></h3>' +
+      '<input type="text" id="part-search" placeholder="🔍 부품/계통 검색 (예: 선회, 릴리프, SW-HYD)" value="' + esc(state.partQuery) + '">' +
+      results +
+      (selectedPart
+        ? '<div><span class="code-chip" id="selected-part-code">' + esc(selectedPart.part_code) + '</span> ' +
+          '<span id="selected-part-label">' + esc(selectedSystem.label) + ' / ' + esc(selectedPart.label) + '</span></div>'
+        : '<p class="muted" style="margin-top:6px">선택된 코드 없음</p>') +
+      '<label class="check-row" style="margin-top:8px"><input type="checkbox" id="chk-undetermined"' + (f.undetermined ? " checked" : "") + '> 원인 미확정으로 종결</label>' +
+      '<select id="undetermined-reason"' + (f.undetermined ? "" : " disabled") + '><option value="">사유 선택 *필수</option>' + reasons + '</select>' +
+
+      '<h3>② 조치 내용 <span class="sr">*필수</span></h3>' +
+      '<select id="action-type"><option value="">조치 유형 선택</option>' +
+      ["점검", "조정", "부품교체", "안내"].map(function (t) {
+        return '<option value="' + t + '"' + (f.action_type === t ? " selected" : "") + '>' + t + '</option>';
+      }).join("") + '</select>' +
+      '<input type="text" id="action-detail" placeholder="조치 내용" value="' + esc(f.action_detail) + '" style="margin-top:8px">' +
+
+      '<h3>③ 판단 근거 <span class="sr">*필수(1개 이상 체크)</span></h3>' +
+      refChecks +
+      '<input type="text" id="rationale-text" placeholder="보충 서술 (예: 냉간 시 선회 압력 순간 상승으로 판단)" value="' + esc(f.rationale_text) + '">' +
+
+      '<h3>④ 재발 방지 <span class="sr">선택</span></h3>' +
+      '<input type="text" id="prevention" placeholder="예: 동절기 예열 절차 안내" value="' + esc(f.prevention) + '">' +
+
+      '<button class="primary" id="btn-finalize" data-action="finalize-opinion">결론 확정</button>' +
+      '</section>';
   }
 
   /* ────────────────────────── 액션 처리 ────────────────────────── */
@@ -633,6 +841,124 @@
         break;
       }
 
+      /* E-02 근거 점프 */
+      case "jump":
+        state.hl = {
+          input_id: el.getAttribute("data-input"),
+          start: parseInt(el.getAttribute("data-start"), 10),
+          end: parseInt(el.getAttribute("data-end"), 10)
+        };
+        syncOpinionForm();
+        break;
+
+      /* E-03 AI 분석 */
+      case "run-ai": {
+        var sc = scenarioOf(issue);
+        var gg = E.gap.analyze(MNT, sc, issue.collected);
+        issue.ai_analysis = adapter.analyzeIssue({
+          collected: issue.collected,
+          sufficiency: gg.sufficiency,
+          expertChecks: issue.expert_checks,
+          equipment: issue.equipment_ref
+        });
+        E.statemachine.appendAudit(issue, "ai_analysis",
+          { verdict: issue.ai_analysis.verdict, confidence: issue.ai_analysis.confidence }, "mock-ai");
+        Store.save(db);
+        break;
+      }
+      case "request-field": {
+        var items = (issue.ai_analysis.missing_info || []).slice();
+        issue.pending_request = { items: items, requested_at: now(), reply: null };
+        E.statemachine.transition(issue, "PENDING_FIELD", { actor: "전문가", note: "고객 추가 확인 요청" });
+        notify(issue, "현장에서 확인이 필요한 항목이 있습니다");
+        Store.save(db);
+        break;
+      }
+
+      /* E-04 */
+      case "ai-draft": {
+        syncOpinionForm();
+        var free = state.opinionForm.free_text.trim();
+        if (!free) { alert("자유 서술을 먼저 입력해 주세요."); return; }
+        var draft2 = adapter.draftStructuredOpinion(free);
+        var f2 = state.opinionForm;
+        f2.part_code = draft2.cause_part_code || f2.part_code;
+        f2.action_type = draft2.action_type || f2.action_type;
+        f2.action_detail = draft2.action_detail || f2.action_detail;
+        f2.rationale_text = draft2.rationale_text || f2.rationale_text;
+        f2.prevention = draft2.prevention || f2.prevention;
+        f2.undetermined = draft2.cause_undetermined && !f2.part_code;
+        state.partQuery = "";
+        E.statemachine.appendAudit(issue, "ai_opinion_draft",
+          { part_code: draft2.cause_part_code, action_type: draft2.action_type }, "mock-ai");
+        Store.save(db);
+        break;
+      }
+      case "pick-part": {
+        syncOpinionForm();
+        state.opinionForm.part_code = el.getAttribute("data-code");
+        state.opinionForm.undetermined = false;
+        state.partQuery = "";
+        break;
+      }
+      case "finalize-opinion": {
+        syncOpinionForm();
+        var f3 = state.opinionForm;
+        var refs = Object.keys(f3.refs);
+        if (!f3.undetermined && !f3.part_code) { alert("확정 원인: 부품 코드를 선택하거나 '원인 미확정'을 체크하세요."); return; }
+        if (f3.undetermined && !f3.reason) { alert("원인 미확정 사유 코드를 선택하세요."); return; }
+        if (!f3.action_type || !f3.action_detail.trim()) { alert("조치 유형과 조치 내용을 입력하세요."); return; }
+        if (refs.length === 0) { alert("판단 근거를 1개 이상 체크하세요."); return; }
+        var part3 = f3.part_code ? S.parts.parts.filter(function (p) { return p.part_code === f3.part_code; })[0] : null;
+        var sys3 = part3 ? S.parts.systems.filter(function (s) { return s.system_code === part3.system_code; })[0] : null;
+        var reason3 = S.undetermined.reasons.filter(function (r) { return r.code === f3.reason; })[0];
+        issue.expert_opinion = {
+          original_text: f3.free_text,               // 전문가 원본(자유 서술) — 불변 보존(DP-1)
+          cause_system_code: sys3 ? sys3.system_code : null,
+          cause_system_label: sys3 ? sys3.label : null,
+          cause_part_code: f3.undetermined ? null : f3.part_code,
+          cause_part_label: part3 && !f3.undetermined ? part3.label : null,
+          cause_undetermined: f3.undetermined,
+          cause_undetermined_reason: f3.undetermined ? f3.reason : null,
+          cause_undetermined_reason_label: f3.undetermined && reason3 ? reason3.label : null,
+          action_type: f3.action_type,
+          action_detail: f3.action_detail.trim(),
+          rationale_refs: refs,
+          rationale_text: f3.rationale_text.trim(),
+          prevention: f3.prevention.trim(),
+          finalized_at: now()
+        };
+        E.statemachine.appendAudit(issue, "expert_opinion_finalized", {
+          part_code: issue.expert_opinion.cause_part_code,
+          undetermined: issue.expert_opinion.cause_undetermined,
+          action_type: issue.expert_opinion.action_type
+        }, "전문가");
+        state.opinionForm = null;
+        state.rewriteText = null;
+        Store.save(db);
+        break;
+      }
+
+      /* E-05 승인 후 발송 */
+      case "approve-send": {
+        var rewriteEl = document.getElementById("customer-rewrite");
+        var simplified = rewriteEl ? rewriteEl.value.trim() : state.rewriteText;
+        var tech5 = issue.expert_opinion.original_text || issue.expert_opinion.rationale_text || "";
+        issue.customer_response = {
+          technical_original: tech5,      // 전문가 원본은 덮어쓰지 않는다 — 별도 저장(DP-1)
+          simplified_response: simplified,
+          approved_by: USER.name + "(전문가)",
+          approved_at: now(),
+          delivered_at: now(),
+          delivery_status: "delivered"
+        };
+        E.statemachine.appendAudit(issue, "customer_response_approved", { by: USER.name }, "전문가");
+        E.statemachine.transition(issue, "ANSWERED", { actor: "전문가", note: "승인 후 발송" });
+        notify(issue, "전문가 답변이 도착했습니다 — 해결 여부를 알려주세요");
+        state.rewriteText = null;
+        Store.save(db);
+        break;
+      }
     }
     render();
   }
