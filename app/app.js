@@ -12,8 +12,11 @@
   var adapter = E.mockai.createMockAdapter(S.parts);
   var MNT = S.maintenance;
 
-  /** 데모 사용자 — 역할은 사람 단위가 아니라 화면 모드 단위(원문 3장) */
+  /** 데모 사용자 — 역할은 사람 단위가 아니라 화면 모드 단위(원문 3장). 단일 사용자 하드코딩은 Phase 1 범위 */
   var USER = { name: "김현장", roles: ["reporter", "expert"] };
+
+  /** 자유 입력(현상 설명·전문가 자유 서술) 최대 길이 */
+  var MAX_FREE_TEXT = 5000;
 
   /** 보유장비 목록 (MNT-12 장비 식별 — 질문 예산을 소모하지 않는 자동 획득, P5) */
   var EQUIPMENTS = [
@@ -734,6 +737,10 @@
       case "analyze": {
         var text = document.getElementById("input-text").value.trim();
         if (!text) { alert("현상을 입력해 주세요."); return; }
+        if (text.length > MAX_FREE_TEXT) {
+          alert("현상 설명이 너무 깁니다(" + text.length + "자). " + MAX_FREE_TEXT + "자 이내로 핵심만 적어 주세요.");
+          return;
+        }
         var eq = EQUIPMENTS[parseInt(document.getElementById("select-equipment").value, 10)];
         startAnalysis(text, eq);
         break;
@@ -880,6 +887,10 @@
         syncOpinionForm();
         var free = state.opinionForm.free_text.trim();
         if (!free) { alert("자유 서술을 먼저 입력해 주세요."); return; }
+        if (free.length > MAX_FREE_TEXT) {
+          alert("자유 서술이 너무 깁니다(" + free.length + "자). " + MAX_FREE_TEXT + "자 이내로 정리해 주세요.");
+          return;
+        }
         var draft2 = adapter.draftStructuredOpinion(free);
         var f2 = state.opinionForm;
         f2.part_code = draft2.cause_part_code || f2.part_code;
