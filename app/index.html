@@ -14,7 +14,8 @@
       <button id="mode-expert" type="button">전문가</button>
     </div>
     <button id="btn-load-seed" class="util" type="button" title="원문 15장 ISSUE #1024 시나리오를 IN_REVIEW 상태로 로드">시드 데모</button>
-    <button id="btn-reset" class="util" type="button" title="LocalStorage 초기화">초기화</button>
+    <button id="btn-settings" class="util" type="button" title="STT 엔진·미디어 정밀 분석 설정">⚙ 설정</button>
+    <button id="btn-reset" class="util" type="button" title="LocalStorage + 미디어 저장소 초기화">초기화</button>
   </header>
 
   <main id="root" aria-live="polite"></main>
@@ -28,6 +29,11 @@
   <script src="../engine/question.js"></script>
   <script src="../engine/statemachine.js"></script>
   <script src="../engine/mockai.js"></script>
+  <!-- 2차 고도화: 미디어·STT·비전 어댑터 + IndexedDB 미디어 저장소 -->
+  <script src="../engine/media.js"></script>
+  <script src="../engine/stt.js"></script>
+  <script src="../engine/aivision.js"></script>
+  <script src="mediastore.js"></script>
   <!-- 시드: 원문 15장 End-to-End 시나리오 (ISSUE #1024) -->
   <script src="../seed/issue1024.js"></script>
   <script src="app.js"></script>

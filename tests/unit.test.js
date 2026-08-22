@@ -318,5 +318,176 @@ test("app/schema.bundle.js 가 schema/*.json 과 동기화되어 있음", () => 
   assert.deepStrictEqual(bundle.undetermined, undetermined);
 });
 
-console.log("\n결과: " + passed + " 통과, " + failed + " 실패");
-if (failed > 0) process.exit(1);
+/* ───────────────── 2차 고도화(음성·STT·미디어) 모듈 ───────────────── */
+const media = require("../engine/media.js");
+const stt = require("../engine/stt.js");
+const aivision = require("../engine/aivision.js");
+
+/** 비동기 테스트 헬퍼 — 마지막에 순서대로 실행 후 결과 집계 */
+const asyncTests = [];
+function atest(name, fn) { asyncTests.push({ name, fn }); }
+
+console.log("\n[9] media — 파일 검증·용량 제한·프레임 추출·포맷");
+test("유형 판별: audio/image/video, 그 외 거부", () => {
+  assert.strictEqual(media.kindOf("audio/webm"), "audio");
+  assert.strictEqual(media.kindOf("image/png"), "image");
+  assert.strictEqual(media.kindOf("video/mp4"), "video");
+  assert.strictEqual(media.kindOf("application/pdf"), null);
+  assert.strictEqual(media.validateFile({ name: "a.pdf", type: "application/pdf", size: 10 }).ok, false);
+});
+test("영상 50MB 제한: 초과 시 명확한 안내, 이내는 통과", () => {
+  const over = media.validateFile({ name: "v.mp4", type: "video/mp4", size: 50 * 1024 * 1024 + 1 });
+  assert.strictEqual(over.ok, false);
+  assert.ok(over.error.indexOf("용량 초과") >= 0 && over.error.indexOf("50.0MB") >= 0);
+  const under = media.validateFile({ name: "v.mp4", type: "video/mp4", size: 49 * 1024 * 1024 });
+  assert.deepStrictEqual(under, { ok: true, kind: "video" });
+  assert.strictEqual(media.LIMITS.video, 50 * 1024 * 1024);
+});
+test("frameTimes: 최대 3장(10/50/90%), 짧은 영상은 중앙 1장, 잘못된 길이는 [0]", () => {
+  assert.deepStrictEqual(media.frameTimes(100, 3), [10, 50, 90]);
+  assert.deepStrictEqual(media.frameTimes(1.5, 3), [0.75]);
+  assert.deepStrictEqual(media.frameTimes(0, 3), [0]);
+  assert.deepStrictEqual(media.frameTimes(60, 1), [30]);
+  assert.ok(media.frameTimes(200, 3).length <= 3);
+});
+test("formatBytes/formatDuration", () => {
+  assert.strictEqual(media.formatBytes(52428800), "50.0MB");
+  assert.strictEqual(media.formatBytes(2048), "2.0KB");
+  assert.strictEqual(media.formatDuration(75), "1:15");
+});
+
+console.log("\n[10] media — transcript 세그먼트 병합·char offset 매핑(근거 점프)");
+const SEGS = [
+  { text: "붐을 내리고 오른쪽으로 돌면", start_ms: 0, end_ms: 2100 },
+  { text: "가끔 덜컹거립니다.", start_ms: 2100, end_ms: 3900 }
+];
+test("buildTranscript: 세그먼트 이어붙이기 + char offset 계산", () => {
+  const t = media.buildTranscript(SEGS);
+  assert.strictEqual(t.text, "붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다.");
+  assert.strictEqual(t.segments[0].char_start, 0);
+  assert.strictEqual(t.text.slice(t.segments[1].char_start, t.segments[1].char_end), "가끔 덜컹거립니다.");
+  assert.strictEqual(t.segments[1].start_ms, 2100);
+});
+test("locateSegments: 사용자 편집(앞에 문구 추가) 후에도 세그먼트 위치 재탐색", () => {
+  const edited = "HX220A 장비입니다. 붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다.";
+  const located = media.locateSegments(edited, SEGS);
+  assert.strictEqual(edited.slice(located[0].char_start, located[0].char_end), "붐을 내리고 오른쪽으로 돌면");
+  assert.strictEqual(edited.slice(located[1].char_start, located[1].char_end), "가끔 덜컹거립니다.");
+  const removed = media.locateSegments("전혀 다른 텍스트", SEGS);
+  assert.strictEqual(removed[0].char_start, -1, "삭제된 세그먼트는 -1 (오디오 재생만 가능)");
+});
+test("segmentForRange: '덜컹' char 구간 → 두 번째 세그먼트(start_ms 2100)로 매핑", () => {
+  const full = "붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다.";
+  const located = media.locateSegments(full, SEGS);
+  const idx = full.indexOf("덜컹");
+  const seg = media.segmentForRange(located, idx, idx + 2);
+  assert.ok(seg && seg.start_ms === 2100);
+  assert.strictEqual(media.segmentForRange(located, 9999), null);
+});
+
+console.log("\n[11] stt — Web Speech 어댑터(주입 테스트)·Whisper 응답 파서");
+test("가짜 SpeechRecognition 주입 → 녹음 기준 ms 세그먼트 기록", () => {
+  let clock = 10000;
+  let instance = null;
+  function FakeSR() {
+    instance = this;
+    this.start = () => {};
+    this.stop = () => { if (this.onend) this.onend(); };
+  }
+  const engine = stt.createWebSpeechSTT({ Impl: FakeSR, now: () => clock });
+  const got = [];
+  engine.onsegment = (s) => got.push(s);
+  engine.start(); // t0 = 10000
+  clock = 12100;
+  instance.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "붐을 내리고 오른쪽으로 돌면" }], { isFinal: true })] });
+  clock = 13900;
+  instance.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "가끔 덜컹거립니다." }], { isFinal: true })] });
+  let ended = null;
+  engine.onend = (segs) => { ended = segs; };
+  engine.stop();
+  assert.deepStrictEqual(got, [
+    { text: "붐을 내리고 오른쪽으로 돌면", start_ms: 0, end_ms: 2100 },
+    { text: "가끔 덜컹거립니다.", start_ms: 2100, end_ms: 3900 }
+  ]);
+  assert.strictEqual(ended.length, 2);
+});
+test("interim 결과는 세그먼트로 저장하지 않고 oninterim 으로만 전달", () => {
+  let instance = null;
+  function FakeSR() { instance = this; this.start = () => {}; this.stop = () => {}; }
+  const engine = stt.createWebSpeechSTT({ Impl: FakeSR, now: () => 0 });
+  let interim = null;
+  engine.oninterim = (t) => { interim = t; };
+  engine.start();
+  instance.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "붐을 내" }], { isFinal: false })] });
+  assert.strictEqual(interim, "붐을 내");
+  assert.strictEqual(engine.segments.length, 0);
+});
+test("Whisper verbose_json 세그먼트 → ms 변환 / 일반 응답 → 1세그먼트", () => {
+  const segs = stt.parseWhisperResponse({
+    text: "전체", segments: [{ start: 0, end: 2.1, text: " 붐을 내리고 " }, { start: 2.1, end: 3.9, text: "가끔 덜컹거립니다." }]
+  });
+  assert.deepStrictEqual(segs[0], { text: "붐을 내리고", start_ms: 0, end_ms: 2100 });
+  const single = stt.parseWhisperResponse({ text: "덜컹거립니다" }, 4000);
+  assert.deepStrictEqual(single, [{ text: "덜컹거립니다", start_ms: 0, end_ms: 4000 }]);
+});
+
+console.log("\n[12] aivision — 비전 어댑터(키 없으면 비활성, fetch 주입 검증)");
+test("provider/키 미설정 → 어댑터 null (기본 경로는 완전 오프라인)", () => {
+  assert.strictEqual(aivision.createVisionAdapter(null), null);
+  assert.strictEqual(aivision.createVisionAdapter({ provider: "none", api_key: "x" }), null);
+  assert.strictEqual(aivision.createVisionAdapter({ provider: "claude", api_key: "" }), null);
+});
+test("parseDataURI / parseFindings(코드펜스 허용)", () => {
+  const p = aivision.parseDataURI("data:image/png;base64,AAAA");
+  assert.deepStrictEqual(p, { media_type: "image/png", base64: "AAAA" });
+  assert.strictEqual(aivision.parseDataURI("http://x/y.png"), null);
+  const f = aivision.parseFindings('```json\n{"summary":"유압 호스 누유","observed":["붐 실린더"],"hazards":[]}\n```');
+  assert.strictEqual(f.summary, "유압 호스 누유");
+  assert.deepStrictEqual(f.observed, ["붐 실린더"]);
+});
+atest("요청 형식: 이미지 base64 블록 + 버전 헤더, 응답 → media_findings 구조화", async () => {
+  let captured = null;
+  const fakeFetch = (url, init) => {
+    captured = { url, init };
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ content: [{ text: '{"summary":"선회부 오일 비침","observed":["선회 모터"],"hazards":["누유 흔적"]}' }] })
+    });
+  };
+  const adapter = aivision.createVisionAdapter({ provider: "claude", api_key: "test-key" }, fakeFetch);
+  const out = await adapter.analyzeMedia({ images: ["data:image/png;base64,AAAA"], context: "덜컹거립니다" });
+  assert.strictEqual(captured.url, "https://api.anthropic.com/v1/messages");
+  assert.strictEqual(captured.init.headers["anthropic-version"], "2023-06-01");
+  const body = JSON.parse(captured.init.body);
+  assert.strictEqual(body.messages[0].content[0].source.data, "AAAA");
+  assert.strictEqual(out.summary, "선회부 오일 비침");
+  assert.deepStrictEqual(out.hazards, ["누유 흔적"]);
+});
+atest("OpenAI 형식: image_url data URI + json_object, 오류 응답은 예외로 전달", async () => {
+  const okFetch = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: '{"summary":"s","observed":[],"hazards":[]}' } }] })
+  });
+  const adapter = aivision.createVisionAdapter({ provider: "openai", api_key: "k" }, okFetch);
+  const out = await adapter.analyzeMedia({ images: ["data:image/png;base64,BBBB"] });
+  assert.strictEqual(out.summary, "s");
+  const failFetch = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+  const bad = aivision.createVisionAdapter({ provider: "openai", api_key: "k" }, failFetch);
+  await assert.rejects(() => bad.analyzeMedia({ images: ["data:image/png;base64,BBBB"] }), /401/);
+});
+
+(async () => {
+  for (const t of asyncTests) {
+    try {
+      await t.fn();
+      passed++;
+      console.log("  ✔ " + t.name);
+    } catch (e) {
+      failed++;
+      console.error("  ✘ " + t.name);
+      console.error("    " + (e && e.message));
+    }
+  }
+  console.log("\n결과: " + passed + " 통과, " + failed + " 실패");
+  if (failed > 0) process.exit(1);
+})();
