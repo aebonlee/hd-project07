@@ -5,8 +5,8 @@
 > **한 줄 정의**: 현장 사용자가 전문용어 없이 현상을 설명하면 AI가 상황별 정보요건을 스스로 정해 **판단을 바꿀 질문 3개 이내**로 Issue를 정형화하고, 전문가가 근거 점프와 AI 보조 분석으로 **확정원인·조치·근거·재발방지 4필드** 결론을 내려 고객 언어로 승인·회신하며, **고객이 해결을 확인한 사례만 Knowledge로 축적**하는 플랫폼.
 
 - 기획: 정광호 (생성형 AI 업무자동화 전문가과정 — Field-Insight 시스템 개발계획서)
-- 범위: **MVP-1** — 정비 Domain · 텍스트 입력 · 전체 루프 1회전
-- 아키텍처: **Phase 1** — 브라우저 + 로컬 JavaScript + **Mock AI Rule Engine** + LocalStorage (외부 AI/LLM API 호출 없음)
+- 범위: **MVP-1** — 정비 Domain · 전체 루프 1회전 + **2차 고도화(현장 입력)**: 음성 녹음·실시간 STT·이미지/영상 첨부 (MVP-2/3 선반영)
+- 아키텍처: **Phase 1** — 브라우저 + 로컬 JavaScript + **Mock AI Rule Engine** + LocalStorage/IndexedDB (기본 경로는 외부 AI/LLM API 호출 없음 — STT 정밀·비전 분석은 사용자가 키를 입력한 경우에만 선택 동작)
 
 ---
 
@@ -22,7 +22,22 @@
 
 > 모바일 우선 UI: 현장 사용자는 장갑을 끼고 작업하므로 모든 버튼의 터치 영역을 48px 이상으로 설계했습니다.
 
-## 2. 데모 시나리오 워크스루 (ISSUE #1024)
+## 2. 현장 입력 사용법 (2차 고도화 — 음성·이미지·영상)
+
+위험한 현장에서 화면 응시와 타이핑을 최소화하기 위한 입력 방식입니다.
+
+| 기능 | 사용법 | 비고 |
+|---|---|---|
+| 🎤 음성 접수 | C-01 상단 **[음성으로 접수]** (64px 대형 버튼) → 말하기 → **[■ 녹음 끝내기]** | 녹음 중에는 어두운 오버레이 + 진행 시간만 표시(화면 응시 최소화). 녹음 여러 개 첨부 가능 |
+| 자동 텍스트 변환(STT) | 기본: **Web Speech API** — 말하는 즉시 텍스트 입력란에 자동 삽입 | **크롬/엣지 + 네트워크 필요**(음성이 브라우저 제조사 서버 경유). 미지원 브라우저는 안내 후 녹음만 첨부 |
+| Whisper 전사(선택) | **[⚙ 설정]** → STT 엔진 'Whisper' + API 키 입력 → 녹음 종료 후 파일 업로드 전사 | 키는 이 브라우저 localStorage 에만 저장. 세그먼트 타임스탬프 포함 |
+| 📷/🎬 이미지·영상 첨부 | C-01 의 [사진 첨부]/[영상 첨부] — 모바일은 카메라 바로 촬영 | **영상 50MB 제한**(초과 시 안내). 원본은 IndexedDB 에 불변 보존, 이슈에는 참조만(DP-1) |
+| 미디어 정밀 분석(선택) | **[⚙ 설정]** → 비전 제공사 + API 키 입력 → 접수 시 이미지·영상 프레임(최대 3장) 분석 | 결과(현상 요약/보이는 부품/위험 신호)는 E-03 "미디어 분석" 섹션에 표시. 위험 신호는 긴급 분기 연동. **키가 없으면 완전 오프라인 규칙 엔진으로만 동작** |
+| 음성 근거 점프 | 전문가 E-02 에서 음성 유래 필드의 근거 클릭 → 해당 **전사 세그먼트부터 오디오 재생** + 구간 하이라이트 | transcript = `{text, start_ms, end_ms}` (원문 13장 스키마, word-timestamp 의 세그먼트 근사) |
+
+> **브라우저 저장 용량 안내**: 첨부 미디어는 브라우저 IndexedDB 에 저장됩니다. 허용 용량은 브라우저·디스크 여유에 따라 다르며(보통 수백 MB 이상), 기기를 바꾸면 미디어는 이관되지 않습니다(Phase 2 서버 저장 전환 지점). 방식 비교·보존 정책 논의는 [docs/현장입력_고도화_검토의견.md](docs/현장입력_고도화_검토의견.md) 참고.
+
+## 3. 데모 시나리오 워크스루 (ISSUE #1024)
 
 기획서 15장 End-to-End 시나리오가 그대로 재현됩니다.
 
@@ -38,7 +53,7 @@
 | 8. 회신 승인 | E-05 | 전문가 원본 vs AI 고객용 재작성 나란히 → **[승인 후 발송]** → ANSWERED |
 | 9. 해결 확인 | C-05 | 고객 **[해결됨]** → RESOLVED → 원인 확정+승인 사례만 **KNOWLEDGE_READY**(지식 승격 후보) |
 
-## 3. MVP-1 범위와 FR 매핑
+## 4. MVP-1 범위와 FR 매핑
 
 | FR | 요구사항 | 구현 위치 |
 |---|---|---|
@@ -66,7 +81,7 @@
 
 Phase 1에서도 실제 스키마로 구현한 4가지(원문 16장): **`evidence_ref` · `confidence` · Issue 상태머신 · 회신 루프** — 모두 포함.
 
-## 4. 아키텍처
+## 5. 아키텍처
 
 ```text
 schema/  ─ 데이터 우선(SSOT). 코드가 아니라 데이터로 도메인을 정의
@@ -81,9 +96,12 @@ engine/  ─ 순수 JS(UMD) — 브라우저·Node 양쪽에서 동일하게 동
  ├─ question.js     DecisionImpact = 판별력 × 획득가능성 × 미확보도 → 질문 ≤3
  ├─ confidence.js   출처 기반 신뢰도(uttered .95/answered .99/system 1.0/inferred .6/default .4/ambiguous .5)
  ├─ statemachine.js 상태머신(불법 전이 throw) + append-only 감사 이력
- └─ mockai.js       ★ LLM 어댑터 인터페이스 + Mock Rule Engine 구현
+ ├─ mockai.js       ★ LLM 어댑터 인터페이스 + Mock Rule Engine 구현
+ ├─ media.js        (2차) 파일 검증(영상 50MB)·transcript 병합·char 매핑·프레임 시점 계산
+ ├─ stt.js          (2차) Web Speech 실시간 전사(세그먼트 ms) + Whisper 업로드 어댑터
+ └─ aivision.js     (2차) 선택 정밀 모드 비전 어댑터(키 입력 시에만, 기본은 오프라인)
 
-app/     ─ 단일 페이지(C-01~05 / E-01~05, 역할 모드 토글, LocalStorage)
+app/     ─ 단일 페이지(C-01~05 / E-01~05, 역할 모드 토글, LocalStorage + IndexedDB 미디어 스토어)
 seed/    ─ ISSUE #1024 시나리오 시드(엔진으로 생성 — 데이터 박제 아님)
 tests/   ─ 단위(node) + E2E(Playwright)
 ```
@@ -94,10 +112,10 @@ tests/   ─ 단위(node) + E2E(Playwright)
 |---|---|---|---|
 | AI | `mockai.createMockAdapter()` (규칙/템플릿) | Local LLM | `analyzeIssue / draftStructuredOpinion / rewriteForCustomer` 3개 메서드를 가진 어댑터로 교체. 화면·상태머신·스키마는 그대로 |
 | 저장소 | `app/app.js` 의 `Store` (LocalStorage) | 서버/DB | `Store.load/save/reset` 인터페이스 유지한 채 구현만 교체 |
-| 입력 | 텍스트(char offset evidence) | 음성 STT | `evidence_ref` 의 `start/end` 를 word-timestamp(`start_ms/end_ms`)로 확장 — 스키마 위치는 동일 |
+| 입력 | 텍스트 char offset + **음성 세그먼트 ms**(2차 구현) | word-level timestamp | `transcript[]` 스키마 동일 — 로컬 Whisper 등으로 세그먼트를 word 로 상세화만 하면 됨 |
 | 유사사례 | `mockai.js` 의 `MOCK_CASES` | Local Vector DB | 검증(RESOLVED) 사례만 색인(DP-8) |
 
-## 5. 스키마 확장 방법 — Domain 추가
+## 6. 스키마 확장 방법 — Domain 추가
 
 1. `schema/domains.json` 의 해당 도메인에 `active: true` 와 `keywords`, `schema_ref` 를 채운다.
 2. `schema/<domain>.requirements.json` 을 만든다 — `maintenance.requirements.json` 과 동일 구조:
@@ -106,21 +124,22 @@ tests/   ─ 단위(node) + E2E(Playwright)
 3. `node tools/build-schema-bundle.js` 로 `app/schema.bundle.js` 를 재생성한다(원본 JSON이 항상 SSOT — 번들 동기화는 단위 테스트가 검증).
 4. 엔진 코드는 수정할 필요가 없다 — intent/gap/question/confidence 는 전부 스키마 데이터 구동이다.
 
-## 6. 테스트
+## 7. 테스트
 
 ```bash
-# 단위 테스트 (34건): DecisionImpact 수기 검증, confidence 테이블, 상태머신 전이/불법 전이,
-# Intent/안전 감지, Gap 분석(15장 Step 2 재현), 질문 3개 제한·'하' 제외, Mock AI, 스키마 동기화
+# 단위 테스트 (48건): DecisionImpact 수기 검증, confidence 테이블, 상태머신 전이/불법 전이,
+# Intent/안전 감지, Gap 분석(15장 Step 2 재현), 질문 3개 제한·'하' 제외, Mock AI, 스키마 동기화,
+# (2차) 파일 검증·프레임 계산·transcript char 매핑·STT 세그먼트 타이밍·Whisper 파서·비전 어댑터
 node tests/unit.test.js
 
-# E2E (Playwright/Chromium): 시드 재현 + 15장 시나리오 전체 루프 1회전
-#   접수 → 질문 3개 → 선택적 확인 → 전문가 큐 → 근거 점프 → AI 분석(B) →
-#   4필드 확정(SW-HYD-0412) → 승인 발송 → 해결됨 → KNOWLEDGE_READY
+# E2E (Playwright/Chromium, 18단계): 시드 재현 + 15장 전체 루프 1회전(텍스트 경로)
+#   + (2차) 가짜 마이크 녹음/정지, STT 자동 삽입(주입형 SpeechRecognition), 이미지 첨부(setInputFiles),
+#     IndexedDB 저장 검증, 음성 세그먼트 근거 점프
 node tests/e2e.test.js
 # playwright 미설치 시: npm i playwright 후 실행하거나 PLAYWRIGHT_DIR=<node_modules/playwright 경로> 지정
 ```
 
-## 7. 설계 원칙 반영 요약 (DP-1~9)
+## 8. 설계 원칙 반영 요약 (DP-1~9)
 
 - **DP-1/2** 원본 불변 + 모든 정형화 값에 `evidence_ref`(input_id + char offset). 근거를 못 대는 값은 "미확보"로 남김
 - **DP-3** 질문은 예산 — DecisionImpact 상위 최대 3개만
