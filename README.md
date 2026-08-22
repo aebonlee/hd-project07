@@ -16,7 +16,7 @@
 
 1. `app/index.html` 을 브라우저(Chrome 권장)로 엽니다.
 2. 상단 **[시드 데모]** 버튼을 누르면 기획서 15장 시나리오(ISSUE #1024)가 **IN_REVIEW** 상태로 로드되어 전문가 흐름을 바로 체험할 수 있습니다.
-3. **[접수자] / [전문가]** 토글로 화면 모드를 전환합니다(역할은 계정 분리가 아니라 `user.roles[]` + 모드 토글).
+3. **[접수자] / [전문가]** 토글로 화면 모드를 전환합니다(역할은 계정 분리가 아니라 `user.roles[]` + 모드 토글). 사용자는 **Phase 1 범위로 데모 사용자 1명(김현장, reporter+expert)만 하드코딩**되어 있으며, 다중 사용자/인증은 Phase 2(서버·DB 교체) 범위입니다.
 4. 접수자 모드의 **[+ 새 이슈 접수]** 로 전체 루프(접수→판단→회신→해결확인→Knowledge 후보)를 처음부터 돌릴 수 있습니다.
 5. **[초기화]** 버튼은 LocalStorage 데이터를 삭제합니다.
 
@@ -127,8 +127,8 @@ tests/   ─ 단위(node) + E2E(Playwright)
 ## 7. 테스트
 
 ```bash
-# 단위 테스트 (48건): DecisionImpact 수기 검증, confidence 테이블, 상태머신 전이/불법 전이,
-# Intent/안전 감지, Gap 분석(15장 Step 2 재현), 질문 3개 제한·'하' 제외, Mock AI, 스키마 동기화,
+# 단위 테스트: DecisionImpact 수기 검증, confidence 테이블, 상태머신 전이/불법 전이,
+# Intent/안전 감지, Gap 분석(15장 Step 2 재현), 질문 3개 제한·'하' 제외, Mock AI(빈/널 입력 가드 포함), 스키마 동기화,
 # (2차) 파일 검증·프레임 계산·transcript char 매핑·STT 세그먼트 타이밍·Whisper 파서·비전 어댑터
 node tests/unit.test.js
 

@@ -259,6 +259,30 @@ test("기술 언어 → 고객 언어 치환 템플릿 (원문 10.4 예시)", ()
   assert.ok(out.indexOf("예열한 후") >= 0, "예열 안내 포함");
 });
 
+test("빈/널 입력 가드: draftStructuredOpinion → 미확정 빈 초안 (throw 없음)", () => {
+  [null, undefined, "", "   "].forEach((input) => {
+    const d = adapter.draftStructuredOpinion(input);
+    assert.strictEqual(d.cause_part_code, null);
+    assert.strictEqual(d.cause_system_code, null);
+    assert.strictEqual(d.cause_undetermined, true);
+    assert.strictEqual(d.action_detail, "");
+    assert.strictEqual(d.rationale_text, "");
+    assert.strictEqual(d.prevention, "");
+    assert.ok(d.note && d.note.indexOf("비어") >= 0, "빈 입력 안내 note");
+  });
+});
+test("빈/널 입력 가드: rewriteForCustomer → 빈 문자열 (안내 문구만 붙은 회신문 금지)", () => {
+  [null, undefined, "", "  \n "].forEach((input) => {
+    assert.strictEqual(adapter.rewriteForCustomer(input), "");
+  });
+});
+test("컨텍스트 미전달 가드: analyzeIssue(null/{}) → D(정보 부족) 판정 (throw 없음)", () => {
+  [null, undefined, {}].forEach((ctx) => {
+    const a = adapter.analyzeIssue(ctx);
+    assert.strictEqual(a.verdict, "D");
+  });
+});
+
 console.log("\n[8] 스키마 무결성 + 번들 동기화");
 test("MNT-01~12 12개 요건, 원문 7.2 판별력/획득가능성 일치", () => {
   assert.strictEqual(mntSchema.requirements.length, 12);

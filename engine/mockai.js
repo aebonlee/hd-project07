@@ -108,6 +108,7 @@
      * @param {Object} ctx {collected, sufficiency(0~1), expertChecks[], equipment}
      */
     function analyzeIssue(ctx) {
+      ctx = ctx || {}; // 컨텍스트 미전달 가드 — sufficiency 0 → D(정보 부족) 판정으로 수렴
       var collected = ctx.collected || [];
       var sufficiency = typeof ctx.sufficiency === "number" ? ctx.sufficiency : 0;
       var checks = ctx.expertChecks || [];
@@ -193,7 +194,18 @@
      * 키워드→계통/부품 코드 매핑 + 문장 분류 템플릿.
      */
     function draftStructuredOpinion(freeText) {
-      var t = String(freeText || "");
+      var t = (freeText == null ? "" : String(freeText)).trim();
+
+      // 빈 입력 가드: 예외 대신 '미확정 빈 초안'을 돌려준다 (DP-5 — 근거 없는 값을 만들지 않는다)
+      if (!t) {
+        return {
+          cause_system_code: null, cause_system_label: null,
+          cause_part_code: null, cause_part_label: null,
+          cause_undetermined: true,
+          action_type: null, action_detail: "", rationale_text: "", prevention: "",
+          note: "자유 서술이 비어 있어 초안을 생성하지 못했습니다. 서술을 입력한 뒤 다시 시도하세요."
+        };
+      }
 
       // 1) 부품/계통 코드 매핑
       var partCode = null;
@@ -243,7 +255,8 @@
      * 치환 템플릿 + 예열 안내/후속 요청 문장 부착. 전문가 원본은 덮어쓰지 않는다(별도 CustomerResponse 저장).
      */
     function rewriteForCustomer(technicalText) {
-      var t = String(technicalText || "").trim();
+      var t = (technicalText == null ? "" : String(technicalText)).trim();
+      if (!t) return ""; // 빈 입력 가드: 안내 문구만 붙은 무의미한 회신문을 만들지 않는다
       var out = t;
       CUSTOMER_TERMS.forEach(function (pair) {
         out = out.split(pair[0]).join(pair[1]);
