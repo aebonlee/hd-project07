@@ -43,6 +43,29 @@
 
   var db = Store.load();
 
+  /* 설정(2차 고도화): STT 엔진·비전 제공사·API 키 — 키는 localStorage 에만 보관, 서버 전송 없음 */
+  var Settings = {
+    KEY: "field_insight_settings_v1",
+    defaults: { stt_engine: "webspeech", whisper_key: "", vision_provider: "none", vision_key: "", vision_model: "" },
+    load: function () {
+      try {
+        var raw = localStorage.getItem(this.KEY);
+        var s = raw ? JSON.parse(raw) : {};
+        var out = {};
+        for (var k in this.defaults) out[k] = s[k] != null ? s[k] : this.defaults[k];
+        return out;
+      } catch (e) {
+        var d = {};
+        for (var k2 in this.defaults) d[k2] = this.defaults[k2];
+        return d;
+      }
+    },
+    save: function (s) {
+      try { localStorage.setItem(this.KEY, JSON.stringify(s)); } catch (e) {}
+    }
+  };
+  var settings = Settings.load();
+
   var state = {
     mode: "reporter",       // reporter | expert
     view: "c04",            // reporter: c01/c02/c03/c04/cdetail/safety · expert: e01/edetail
@@ -51,7 +74,14 @@
     hl: null,               // 근거 하이라이트 {input_id, start, end}
     partQuery: "",
     opinionForm: null,      // E-04 작업 중 폼
-    rewriteText: null       // E-05 편집 중 재작성문
+    rewriteText: null,      // E-05 편집 중 재작성문
+    rec: null,              // 녹음 세션 {mr, stream, chunks, startTs, stt}
+    draftMedia: [],         // C-01 첨부 목록 [{media_id, kind, name, size, duration_ms, transcript_segments}]
+    mediaURLs: {},          // media_id → objectURL 캐시
+    activeSeg: null,        // 근거 점프로 강조된 음성 세그먼트 {media_id, index}
+    settingsOpen: false,
+    busy: null,             // 비동기 작업 안내문(미디어 분석 중 등)
+    notice: null            // 일회성 안내문(STT 미지원/실패 등)
   };
 
   /* ────────────────────────── 유틸 ────────────────────────── */
@@ -112,21 +142,327 @@
     if (idx >= 0) target.collected[idx] = item; else target.collected.push(item);
   }
 
+  /* ────────────────────────── 미디어·녹음·STT (2차 고도화) ────────────────────────── */
+
+  function newMediaId() {
+    return "m-" + Date.now() + "-" + Math.floor(Math.random() * 1e6);
+  }
+
+  function mediaURL(mediaId) { return state.mediaURLs[mediaId] || null; }
+
+  /** 렌더 후 [data-media-src] 요소에 IndexedDB Blob 을 objectURL 로 연결 */
+  function hydrateMedia() {
+    var els = root.querySelectorAll("[data-media-src]");
+    Array.prototype.forEach.call(els, function (el) {
+      var id = el.getAttribute("data-media-src");
+      var cached = mediaURL(id);
+      if (cached) { if (el.src !== cached) el.src = cached; return; }
+      window.FI_MEDIA.get(id).then(function (rec) {
+        if (!rec || !rec.blob) return;
+        var url = URL.createObjectURL(rec.blob);
+        state.mediaURLs[id] = url;
+        el.src = url;
+      }).catch(function () {});
+    });
+  }
+
+  /** 음성 근거 점프: 해당 오디오를 세그먼트 시작 지점부터 재생 */
+  function playAudioSegment(mediaId, ms) {
+    var tryPlay = function (attempt) {
+      var audio = root.querySelector('audio[data-media-src="' + mediaId + '"]');
+      if (audio && audio.src) {
+        var seek = function () {
+          try {
+            audio.currentTime = Math.max(0, (ms || 0) / 1000);
+            audio.play().catch(function () {});
+          } catch (e) {}
+        };
+        if (audio.readyState >= 1) seek();
+        else audio.addEventListener("loadedmetadata", seek, { once: true });
+      } else if (attempt < 10) {
+        setTimeout(function () { tryPlay(attempt + 1); }, 150);
+      }
+    };
+    tryPlay(0);
+  }
+
+  function sttUnsupportedNotice() {
+    return "이 브라우저는 실시간 음성 인식(Web Speech)을 지원하지 않습니다. " +
+      "크롬/엣지를 사용하거나, ⚙ 설정에서 Whisper API 키를 등록하면 녹음 파일로 전사할 수 있습니다. " +
+      "녹음 자체는 원본 증거로 첨부됩니다.";
+  }
+
+  /** 녹음 시작: MediaRecorder + (가능하면) Web Speech 실시간 전사 */
+  function startRecording() {
+    if (state.rec) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      state.notice = "이 브라우저는 음성 녹음을 지원하지 않습니다. 텍스트로 입력해 주세요.";
+      render();
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      var mr = new MediaRecorder(stream);
+      var rec = state.rec = {
+        mr: mr, stream: stream, chunks: [], startTs: Date.now(), stt: null, interim: ""
+      };
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) rec.chunks.push(e.data); };
+      mr.onstop = function () { finishRecording(rec); };
+
+      // 실시간 STT (Web Speech) — 세그먼트 타임스탬프는 녹음 시작 기준 ms
+      if (settings.stt_engine === "webspeech" && E.stt.supported(window)) {
+        var engine = E.stt.createWebSpeechSTT({});
+        engine.onsegment = function (seg) { appendTranscriptText(seg.text); };
+        engine.oninterim = function (t) {
+          rec.interim = t;
+          var el = document.getElementById("rec-interim");
+          if (el) el.textContent = t;
+        };
+        engine.onerror = function () { /* 네트워크 오류 등 — 녹음은 계속 */ };
+        rec.stt = engine;
+        try { engine.start(); } catch (e) { rec.stt = null; }
+      } else if (settings.stt_engine === "webspeech") {
+        state.notice = sttUnsupportedNotice();
+      }
+      mr.start();
+      rec.timerId = setInterval(function () {
+        var el = document.getElementById("rec-timer");
+        if (el) el.textContent = E.media.formatDuration((Date.now() - rec.startTs) / 1000);
+      }, 300);
+      render();
+    }).catch(function (err) {
+      state.notice = "마이크 권한이 필요합니다: " + err.message;
+      render();
+    });
+  }
+
+  function stopRecording() {
+    var rec = state.rec;
+    if (!rec) return;
+    if (rec.stt) rec.stt.stop();
+    try { rec.mr.stop(); } catch (e) { finishRecording(rec); }
+  }
+
+  /** 녹음 종료 → Blob 저장(IndexedDB, 원본 불변 DP-1) + 전사 세그먼트 첨부 */
+  function finishRecording(rec) {
+    if (rec.timerId) clearInterval(rec.timerId);
+    rec.stream.getTracks().forEach(function (t) { t.stop(); });
+    var blob = new Blob(rec.chunks, { type: rec.mr.mimeType || "audio/webm" });
+    var durationMs = Date.now() - rec.startTs;
+    var segments = rec.stt ? rec.stt.segments.slice() : [];
+    state.rec = null;
+
+    var check = E.media.validateFile({ name: "recording.webm", type: blob.type || "audio/webm", size: blob.size });
+    if (!check.ok) {
+      state.notice = check.error;
+      render();
+      return;
+    }
+    var mediaId = newMediaId();
+    var name = "음성 녹음 " + (state.draftMedia.filter(function (m) { return m.kind === "audio"; }).length + 1);
+    window.FI_MEDIA.put({
+      media_id: mediaId, kind: "audio", name: name, mime: blob.type || "audio/webm",
+      size: blob.size, duration_ms: durationMs, created_at: now(), blob: blob
+    }).then(function () {
+      var att = {
+        media_id: mediaId, kind: "audio", name: name, mime: blob.type || "audio/webm",
+        size: blob.size, duration_ms: durationMs, transcript_segments: segments
+      };
+      state.draftMedia.push(att);
+      // Whisper 경로: 녹음 파일 업로드 전사 (사용자 키가 있을 때만)
+      if (!segments.length && settings.stt_engine === "whisper" && settings.whisper_key) {
+        state.busy = "음성 전사 중…(Whisper)";
+        render();
+        E.stt.createWhisperSTT({ apiKey: settings.whisper_key })
+          .transcribe(blob, "recording.webm", durationMs)
+          .then(function (segs) {
+            att.transcript_segments = segs;
+            segs.forEach(function (s) { appendTranscriptText(s.text); });
+          })
+          .catch(function (err) { state.notice = "음성 전사 실패: " + err.message + " (녹음은 첨부되었습니다)"; })
+          .then(function () { state.busy = null; render(); });
+      } else if (!segments.length && settings.stt_engine === "whisper") {
+        state.notice = "Whisper API 키가 없습니다. ⚙ 설정에서 키를 입력하면 자동 전사됩니다.";
+      }
+      render();
+    }).catch(function (err) {
+      state.notice = "미디어 저장 실패: " + err.message;
+      render();
+    });
+  }
+
+  /** 전사 텍스트를 입력란에 이어 붙인다 (STT → 텍스트 자동 삽입, 재렌더에도 유지) */
+  function appendTranscriptText(text) {
+    var t = String(text || "").trim();
+    if (!t) return;
+    var ta = document.getElementById("input-text");
+    var cur = ta ? ta.value : (state.c01Text || "");
+    var next = cur.trim() ? cur.replace(/\s+$/, "") + " " + t : t;
+    state.c01Text = next;
+    if (ta) ta.value = next;
+  }
+
+  /** 이미지/영상 파일 첨부 (용량 제한: 영상 50MB — engine/media.js LIMITS) */
+  function attachFile(file) {
+    var check = E.media.validateFile({ name: file.name, type: file.type, size: file.size });
+    if (!check.ok) {
+      state.notice = check.error;
+      render();
+      return;
+    }
+    var mediaId = newMediaId();
+    var record = {
+      media_id: mediaId, kind: check.kind, name: file.name, mime: file.type,
+      size: file.size, duration_ms: null, created_at: now(), blob: file
+    };
+    var finish = function (durationMs) {
+      record.duration_ms = durationMs;
+      window.FI_MEDIA.put(record).then(function () {
+        state.draftMedia.push({
+          media_id: mediaId, kind: check.kind, name: file.name, mime: file.type,
+          size: file.size, duration_ms: durationMs, transcript_segments: []
+        });
+        render();
+      }).catch(function (err) {
+        state.notice = "미디어 저장 실패: " + err.message;
+        render();
+      });
+    };
+    if (check.kind === "video") {
+      var v = document.createElement("video");
+      v.preload = "metadata";
+      v.onloadedmetadata = function () {
+        var d = isFinite(v.duration) ? Math.round(v.duration * 1000) : null;
+        URL.revokeObjectURL(v.src);
+        finish(d);
+      };
+      v.onerror = function () { finish(null); };
+      v.src = URL.createObjectURL(file);
+    } else {
+      finish(null);
+    }
+  }
+
+  function removeDraftMedia(mediaId) {
+    state.draftMedia = state.draftMedia.filter(function (m) { return m.media_id !== mediaId; });
+    window.FI_MEDIA.remove(mediaId).catch(function () {});
+  }
+
+  /* ── 선택 정밀 모드: 이미지/영상 프레임 비전 분석 (키 입력 시에만) ── */
+
+  function blobToDataURI(blob) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(fr.result); };
+      fr.onerror = function () { reject(fr.error); };
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /** 영상에서 프레임 최대 3장 캡처(canvas) → dataURI[] */
+  function captureVideoFrames(blob, durationMs) {
+    return new Promise(function (resolve) {
+      var times = E.media.frameTimes((durationMs || 0) / 1000, 3);
+      var v = document.createElement("video");
+      v.preload = "auto";
+      v.muted = true;
+      v.src = URL.createObjectURL(blob);
+      var canvas = document.createElement("canvas");
+      var out = [];
+      var i = 0;
+      var fail = setTimeout(function () { done(); }, 8000);
+      function done() {
+        clearTimeout(fail);
+        URL.revokeObjectURL(v.src);
+        resolve(out);
+      }
+      function next() {
+        if (i >= times.length) return done();
+        v.currentTime = times[i++];
+      }
+      v.onloadeddata = function () {
+        canvas.width = Math.min(v.videoWidth || 640, 1024);
+        canvas.height = Math.round(canvas.width * ((v.videoHeight || 480) / (v.videoWidth || 640)));
+        next();
+      };
+      v.onseeked = function () {
+        try {
+          canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
+          out.push(canvas.toDataURL("image/jpeg", 0.7));
+        } catch (e) {}
+        next();
+      };
+      v.onerror = function () { done(); };
+    });
+  }
+
+  function visionAdapter() {
+    return E.aivision.createVisionAdapter({
+      provider: settings.vision_provider,
+      api_key: settings.vision_key,
+      model: settings.vision_model || undefined
+    });
+  }
+
+  /** 첨부 이미지 + 영상 프레임 → 비전 분석. 실패해도 기본 경로(규칙 엔진)는 유지 */
+  function analyzeDraftMedia(contextText) {
+    var adapterV = visionAdapter();
+    var visual = state.draftMedia.filter(function (m) { return m.kind === "image" || m.kind === "video"; });
+    if (!adapterV || !visual.length) return Promise.resolve(null);
+    var jobs = visual.map(function (m) {
+      return window.FI_MEDIA.get(m.media_id).then(function (rec) {
+        if (!rec || !rec.blob) return [];
+        return m.kind === "image"
+          ? blobToDataURI(rec.blob).then(function (uri) { return [uri]; })
+          : captureVideoFrames(rec.blob, m.duration_ms);
+      });
+    });
+    return Promise.all(jobs).then(function (lists) {
+      var images = [];
+      lists.forEach(function (l) { l.forEach(function (u) { if (images.length < 3) images.push(u); }); });
+      if (!images.length) return null;
+      return adapterV.analyzeMedia({ images: images, context: contextText });
+    }).catch(function (err) {
+      state.notice = "미디어 분석 실패(" + err.message + ") — 규칙 엔진 분석은 정상 동작합니다.";
+      return null;
+    });
+  }
+
   /* ────────────────────────── 접수 흐름 로직 ────────────────────────── */
 
-  /** C-01 → 분석: Intent/안전 감지 → 시나리오 → 추출 → 질문 생성 */
-  function startAnalysis(text, equipment) {
+  /** C-01 → 분석: Intent/안전 감지 → 시나리오 → 추출(텍스트+미디어 단서) → 질문 생성 */
+  function startAnalysis(text, equipment, mediaFindings) {
     var intentResult = E.intent.classify(text, S.domains);
     var inputId = "input-" + Date.now();
 
-    if (intentResult.safety_flag) {
-      state.draft = { text: text, equipment: equipment, intentResult: intentResult, input_id: inputId };
+    // 안전 분기: 텍스트 위험 키워드(FR-05) + 미디어 분석 위험 신호(선택 정밀 모드) 연동
+    var mediaHazards = (mediaFindings && mediaFindings.hazards) || [];
+    if (intentResult.safety_flag || mediaHazards.length) {
+      mediaHazards.forEach(function (h) {
+        intentResult.safety_hits.push({ keyword: h + " (미디어 분석)", start: -1, end: -1 });
+      });
+      intentResult.safety_flag = true;
+      state.draft = { text: text, equipment: equipment, intentResult: intentResult, input_id: inputId, mediaFindings: mediaFindings };
       state.view = "safety";
       return;
     }
 
     var scenario = E.gap.pickScenario(text, MNT);
     var collected = E.gap.extract(text, MNT, scenario, inputId);
+
+    // 미디어 분석이 새 단서를 주면 미확보 요건에 inferred(0.6) 값으로 반영 → 질문 재산출에 반영(DecisionImpact 미확보도 변화)
+    if (mediaFindings) {
+      var mediaText = [mediaFindings.summary].concat(mediaFindings.observed || []).join(" ");
+      var fromMedia = E.gap.extract(mediaText, MNT, scenario, "media-findings");
+      fromMedia.forEach(function (mc) {
+        var already = collected.some(function (c) { return c.requirement_id === mc.requirement_id; });
+        if (already) return;
+        mc.source_type = "inferred"; // 미디어에서 추론 — 확인 대상 후보
+        mc.confidence = E.confidence.confidenceFor("inferred");
+        mc.coverage = "partial";
+        mc.evidence_ref = { input_id: null, type: "media", detail: "미디어 분석: " + (mc.evidence_ref.matched_text || "") };
+        collected.push(mc);
+      });
+    }
     // MNT-12 장비 식별 — 시스템 자동 획득 (source=system, confidence 1.0)
     collected.push({
       requirement_id: "MNT-12", label: "장비 식별(모델/SN/가동시간)",
@@ -139,7 +475,8 @@
     state.draft = {
       text: text, equipment: equipment, input_id: inputId,
       intentResult: intentResult, scenario: scenario,
-      collected: collected, questions: questions, qIndex: 0
+      collected: collected, questions: questions, qIndex: 0,
+      mediaFindings: mediaFindings || null
     };
     state.view = questions.length ? "c02" : "c03";
   }
@@ -191,10 +528,22 @@
       linked_issues: [],
       /* DP-1/FR-03: 고객 원본은 불변 저장, AI 해석(collected)과 분리 */
       user_input: {
-        input_id: d.input_id, input_type: "text",
+        input_id: d.input_id, input_type: state.draftMedia.length ? "multimodal" : "text",
         original_text: d.text, created_at: now(),
         metadata: d.equipment ? { model: d.equipment.model, sn: d.equipment.sn, hours: d.equipment.hours } : null
       },
+      /* 첨부 미디어: Blob 은 IndexedDB(불변), Issue 에는 참조+전사만. 음성 전사는 최종 텍스트 char 위치를 매핑해 근거 점프에 사용 */
+      attachments: state.draftMedia.map(function (m) {
+        return {
+          media_id: m.media_id,
+          input_type: m.kind === "audio" ? "voice" : m.kind,
+          kind: m.kind, name: m.name, mime: m.mime, size: m.size, duration_ms: m.duration_ms,
+          transcript: m.kind === "audio" && (m.transcript_segments || []).length
+            ? E.media.locateSegments(d.text, m.transcript_segments)
+            : null
+        };
+      }),
+      media_findings: d.mediaFindings || null,
       intent_result: d.intentResult,
       collected: d.collected,
       questions: d.questions || [],
@@ -212,6 +561,17 @@
     };
     E.statemachine.appendAudit(issue, "issue_created",
       { domain: issue.domain, scenario: issue.scenario_id, safety: issue.safety_level }, "접수자");
+    if (issue.attachments.length) {
+      E.statemachine.appendAudit(issue, "media_attached", {
+        count: issue.attachments.length,
+        kinds: issue.attachments.map(function (a) { return a.kind; })
+      }, "접수자");
+    }
+    if (issue.media_findings) {
+      E.statemachine.appendAudit(issue, "media_analysis", {
+        provider: issue.media_findings.provider, summary: issue.media_findings.summary
+      }, "vision-ai");
+    }
     E.statemachine.transition(issue, "SUBMITTED", { actor: "접수자", note: "사용자 접수" });
     notify(issue, "접수되었습니다 (#" + no + ") · 예상 회신 24시간");
     E.statemachine.transition(issue, "ASSIGNED", { actor: "system", note: "자동 배정: 전문가 데모 계정" });
@@ -219,6 +579,8 @@
     db.issues.push(issue);
     Store.save(db);
     state.draft = null;
+    state.draftMedia = [];
+    state.c01Text = "";
     state.current = no;
     state.view = "cdetail";
     return issue;
@@ -242,19 +604,102 @@
       if (state.view === "edetail") html = viewEDetail();
       else html = viewE01();
     }
-    root.innerHTML = html;
+    var banners = "";
+    if (state.busy) banners += '<div class="notice" id="busy-banner">⏳ ' + esc(state.busy) + '</div>';
+    if (state.notice) {
+      banners += '<div class="warnbox" id="notice-banner"><div class="t">안내</div><p>' + esc(state.notice) + '</p>' +
+        '<button class="ghost" data-action="dismiss-notice" style="margin-top:8px">확인</button></div>';
+    }
+    var overlay = state.rec ? viewRecordingOverlay() : "";
+    var settingsHtml = state.settingsOpen ? viewSettings() : "";
+    root.innerHTML = banners + settingsHtml + html + overlay;
+    hydrateMedia();
     var mk = root.querySelector("mark.hl");
     if (mk) mk.scrollIntoView({ block: "center" });
   }
 
-  /* ── C-01 입력 + 장비 선택 ── */
+  /** 녹음 오버레이 — 화면 응시 최소화(어두운 배경 + 큰 정지 버튼 + 진행 표시) */
+  function viewRecordingOverlay() {
+    var rec = state.rec;
+    var sttOn = !!(rec && rec.stt);
+    return '' +
+      '<div class="rec-overlay" id="rec-overlay">' +
+      '<div class="rec-pulse">🎤</div>' +
+      '<div class="rec-time" id="rec-timer">' + E.media.formatDuration((Date.now() - rec.startTs) / 1000) + '</div>' +
+      '<div class="rec-interim" id="rec-interim">' + esc(rec.interim || (sttOn ? "말씀하세요 — 실시간으로 받아 적는 중" : "녹음 중 (이 브라우저는 실시간 전사 미지원)")) + '</div>' +
+      '<button class="rec-stop" id="btn-record-stop" data-action="record-stop">■ 녹음 끝내기</button>' +
+      '</div>';
+  }
+
+  /** ⚙ 설정 — STT 엔진 / 비전 제공사 / API 키 (키는 이 브라우저 localStorage 에만 저장) */
+  function viewSettings() {
+    return '' +
+      '<section class="card" id="settings-view">' +
+      '<h2>⚙ 설정</h2>' +
+      '<p class="muted">API 키는 이 브라우저의 localStorage 에만 저장되며 접수 데이터와 함께 전송되지 않습니다. 키가 없으면 완전 오프라인 규칙 엔진으로 동작합니다.</p>' +
+      '<label class="fld" for="set-stt">음성 인식(STT) 엔진</label>' +
+      '<select id="set-stt">' +
+      '<option value="webspeech"' + (settings.stt_engine === "webspeech" ? " selected" : "") + '>Web Speech API — 무료·키 불필요 (크롬/엣지, 네트워크 필요)</option>' +
+      '<option value="whisper"' + (settings.stt_engine === "whisper" ? " selected" : "") + '>Whisper API — 녹음 파일 업로드 (API 키 필요)</option>' +
+      '</select>' +
+      '<label class="fld" for="set-whisper-key">Whisper API 키 (선택)</label>' +
+      '<input type="text" id="set-whisper-key" placeholder="sk-…" value="' + esc(settings.whisper_key) + '">' +
+      '<label class="fld" for="set-vision">미디어 정밀 분석(비전) 제공사 — 선택</label>' +
+      '<select id="set-vision">' +
+      '<option value="none"' + (settings.vision_provider === "none" ? " selected" : "") + '>사용 안 함 (기본 — 오프라인 규칙 엔진)</option>' +
+      '<option value="claude"' + (settings.vision_provider === "claude" ? " selected" : "") + '>Claude API</option>' +
+      '<option value="openai"' + (settings.vision_provider === "openai" ? " selected" : "") + '>OpenAI API</option>' +
+      '</select>' +
+      '<label class="fld" for="set-vision-key">비전 API 키</label>' +
+      '<input type="text" id="set-vision-key" placeholder="API 키" value="' + esc(settings.vision_key) + '">' +
+      '<label class="fld" for="set-vision-model">비전 모델 (비우면 제공사 기본값)</label>' +
+      '<input type="text" id="set-vision-model" placeholder="기본값 사용" value="' + esc(settings.vision_model) + '">' +
+      '<div class="row-actions">' +
+      '<button class="primary" data-action="save-settings" style="margin-top:0">저장</button>' +
+      '<button class="ghost" data-action="close-settings">닫기</button>' +
+      '</div>' +
+      '</section>';
+  }
+
+  /** C-01/C-03 공용: 첨부 미디어 목록 */
+  function attachmentListHTML(items, removable) {
+    if (!items.length) return "";
+    return '<div class="att-list" id="draft-attachments">' + items.map(function (m) {
+      var icon = m.kind === "audio" ? "🔊" : m.kind === "image" ? "🖼" : "🎬";
+      var meta = E.media.formatBytes(m.size) +
+        (m.duration_ms ? " · " + E.media.formatDuration(m.duration_ms / 1000) : "");
+      var preview = "";
+      if (m.kind === "image") preview = '<img class="att-thumb" data-media-src="' + esc(m.media_id) + '" alt="' + esc(m.name) + '">';
+      if (m.kind === "audio") preview = '<audio controls preload="metadata" data-media-src="' + esc(m.media_id) + '"></audio>';
+      if (m.kind === "video") preview = '<video controls preload="metadata" class="att-video" data-media-src="' + esc(m.media_id) + '"></video>';
+      var stt = (m.transcript_segments || []).length
+        ? '<span class="badge">전사 ' + m.transcript_segments.length + '구간</span>' : "";
+      return '<div class="att-item" data-kind="' + m.kind + '">' +
+        '<div class="att-head">' + icon + ' <b>' + esc(m.name) + '</b> <span class="muted">' + esc(meta) + '</span> ' + stt +
+        (removable ? '<button class="editbtn att-remove" data-action="remove-media" data-id="' + esc(m.media_id) + '" title="삭제">✕</button>' : "") +
+        '</div>' + preview + '</div>';
+    }).join("") + '</div>';
+  }
+
+  /* ── C-01 입력 + 장비 선택 + 음성/미디어 첨부 (2차 고도화: 핸즈프리 우선) ── */
   function viewC01() {
+    var sttReady = E.stt.supported(window);
+    var sttHint = settings.stt_engine === "whisper"
+      ? (settings.whisper_key ? "녹음 종료 후 Whisper 로 자동 전사됩니다." : "Whisper 키 미등록 — ⚙ 설정에서 등록하면 자동 전사됩니다.")
+      : (sttReady ? "말하면 실시간으로 텍스트가 채워집니다." : "이 브라우저는 실시간 전사 미지원 — 녹음은 증거로 첨부됩니다.");
     return '' +
       '<section class="card" id="view-c01">' +
       '<h2>무슨 일이 있었나요? <span class="sr">(C-01)</span></h2>' +
-      '<p class="muted">전문용어 없이, 겪으신 그대로 적어 주세요. 필요한 정보는 저희가 여쭤봅니다.</p>' +
-      '<label class="fld" for="input-text">현상 설명</label>' +
-      '<textarea id="input-text" placeholder="예) 붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다."></textarea>' +
+      '<p class="muted">화면을 보기 어려운 현장에서는 <b>음성으로 접수</b>를 누르고 말씀하세요. 전문용어는 필요 없습니다.</p>' +
+      '<button class="record-btn" id="btn-record" data-action="record-start">🎤 음성으로 접수 (녹음 시작)</button>' +
+      '<p class="muted" style="margin-top:4px">' + esc(sttHint) + '</p>' +
+      '<div class="attach-row">' +
+      '<label class="attach-btn">📷 사진 첨부<input type="file" id="input-image" accept="image/*" capture="environment" hidden></label>' +
+      '<label class="attach-btn">🎬 영상 첨부 <span class="sr">(최대 ' + E.media.formatBytes(E.media.LIMITS.video) + ')</span><input type="file" id="input-video" accept="video/*" hidden></label>' +
+      '</div>' +
+      attachmentListHTML(state.draftMedia, true) +
+      '<label class="fld" for="input-text">현상 설명 (음성 전사 자동 삽입 · 직접 수정 가능)</label>' +
+      '<textarea id="input-text" placeholder="예) 붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다.">' + esc(state.c01Text || "") + '</textarea>' +
       '<label class="fld" for="select-equipment">장비 선택 (보유장비)</label>' +
       '<select id="select-equipment">' +
       EQUIPMENTS.map(function (e, i) {
@@ -360,6 +805,12 @@
       '<p class="muted">' + esc(eqLabel(d.equipment)) + ' · ' + esc(d.scenario.label) + '</p>' +
       '<table class="fields">' + rows + '</table>' +
       boxes + editForm +
+      (state.draftMedia.length
+        ? '<h3>첨부 (' + state.draftMedia.length + '건)</h3>' + attachmentListHTML(state.draftMedia, false)
+        : "") +
+      (d.mediaFindings
+        ? '<p class="notice">🖼 미디어 분석: ' + esc(d.mediaFindings.summary || "") + '</p>'
+        : "") +
       '<div class="origin">고객 원문 “' + esc(d.text) + '”</div>' +
       '<button class="primary" id="btn-submit-issue" data-action="submit-issue">접수하기</button>' +
       '</section>';
@@ -468,6 +919,36 @@
       '</section>';
   }
 
+  /** E-02: 첨부 미디어(원본 증거) — 오디오는 전사 세그먼트 칩(클릭 시 해당 지점 재생) */
+  function expertAttachmentsHTML(issue) {
+    var atts = issue.attachments || [];
+    if (!atts.length) return "";
+    var html = '<h3>첨부 원본 <span class="sr">(IndexedDB 불변 보존 · FR-27 정책 대상)</span></h3><div class="att-list" id="issue-attachments">';
+    atts.forEach(function (m, ai) {
+      var icon = m.kind === "audio" ? "🔊" : m.kind === "image" ? "🖼" : "🎬";
+      var meta = E.media.formatBytes(m.size) +
+        (m.duration_ms ? " · " + E.media.formatDuration(m.duration_ms / 1000) : "");
+      html += '<div class="att-item"><div class="att-head">' + icon + ' <b>' + esc(m.name) + '</b> <span class="muted">' + esc(meta) + '</span></div>';
+      if (m.kind === "image") {
+        html += '<img class="att-thumb" data-media-src="' + esc(m.media_id) + '" data-action="zoom-img" alt="' + esc(m.name) + '" title="클릭하면 확대">';
+      } else if (m.kind === "video") {
+        html += '<video controls preload="metadata" class="att-video" data-media-src="' + esc(m.media_id) + '"></video>';
+      } else {
+        html += '<audio controls preload="metadata" data-media-src="' + esc(m.media_id) + '"></audio>';
+        if (m.transcript && m.transcript.length) {
+          html += '<div class="seg-list">' + m.transcript.map(function (s, si) {
+            var active = state.activeSeg && state.activeSeg.media_id === m.media_id && state.activeSeg.index === si;
+            return '<button class="seg-chip' + (active ? " seg-active" : "") + '" data-action="play-seg" ' +
+              'data-media="' + esc(m.media_id) + '" data-ms="' + s.start_ms + '" data-index="' + si + '">' +
+              '▶ ' + E.media.formatDuration(s.start_ms / 1000) + ' “' + esc(s.text) + '”</button>';
+          }).join("") + '</div>';
+        }
+      }
+      html += '</div>';
+    });
+    return html + '</div>';
+  }
+
   /* ── E-02~E-05 이슈 상세 (근거 점프 · AI 분석 · 구조화 결론 · 승인) ── */
   function viewEDetail() {
     var issue = getIssue(state.current);
@@ -490,6 +971,8 @@
           evi = '<span class="evi">💬 ' + esc((ref.question_id || "").split("-")[0] || "질문") + ' 응답</span>';
         } else if (ref.type === "system") {
           evi = '<span class="evi">⚙ 시스템 획득</span>';
+        } else if (ref.type === "media") {
+          evi = '<span class="evi">🖼 미디어 분석</span>';
         }
         if (c.source_type === "answered" && c.confirmed) val += ' <span class="sr">(고객 확인됨)</span>';
       } else if (c && c.value_state === "unknown") {
@@ -521,12 +1004,21 @@
         ' <span class="sr">(획득가능성 ‘하’ — 고객에게 묻지 않음)</span></p>' : "") +
       '<h3>고객 원문</h3>' +
       '<div class="origin" id="original-text">“' + originalHtml + '”</div>' +
+      expertAttachmentsHTML(issue) +
       (issue.pending_request && issue.pending_request.reply ?
         '<h3>현장 확인 회신</h3><div class="origin">“' + esc(issue.pending_request.reply) + '”</div>' : "") +
       '</section>';
 
-    /* E-03: Mock AI 분석 */
+    /* E-03: Mock AI 분석 (+선택 정밀 모드 미디어 분석 결과) */
     html += '<section class="card" id="ai-section"><h3>AI 1차 분석 <span class="sr">(E-03 · Mock Rule Engine)</span></h3>';
+    if (issue.media_findings) {
+      var mf = issue.media_findings;
+      html += '<div class="simcase" id="media-findings"><b>🖼 미디어 분석</b> <span class="muted">(정밀 모드 · 이미지 ' + (mf.image_count || 0) + '장)</span>' +
+        '<br>현상 요약: ' + esc(mf.summary || "—") +
+        '<br>보이는 장비/부품: ' + esc((mf.observed || []).join(", ") || "—") +
+        ((mf.hazards || []).length ? '<br><span style="color:var(--danger)">⚠ 위험 신호: ' + esc(mf.hazards.join(", ")) + '</span>' : "") +
+        '</div>';
+    }
     if (!issue.ai_analysis) {
       html += '<p class="muted">표준·매뉴얼·과거사례(Mock 저장소)를 근거로 A/B/C/D 판정을 제시합니다.</p>' +
         '<button class="primary" id="btn-run-ai" data-action="run-ai">AI 분석 실행</button>';
@@ -730,14 +1222,59 @@
       case "open-cdetail": state.current = parseInt(el.getAttribute("data-no"), 10); state.view = "cdetail"; break;
       case "open-edetail": openExpertIssue(parseInt(el.getAttribute("data-no"), 10)); break;
 
-      /* C-01 → 분석 */
+      /* C-01 → 분석 (선택 정밀 모드: 첨부 이미지/영상 프레임 비전 분석 후 질문 산출) */
       case "analyze": {
         var text = document.getElementById("input-text").value.trim();
-        if (!text) { alert("현상을 입력해 주세요."); return; }
+        if (!text) { alert("현상을 입력하거나 음성으로 말씀해 주세요."); return; }
+        state.c01Text = text;
         var eq = EQUIPMENTS[parseInt(document.getElementById("select-equipment").value, 10)];
-        startAnalysis(text, eq);
+        var hasVisual = state.draftMedia.some(function (m) { return m.kind === "image" || m.kind === "video"; });
+        if (visionAdapter() && hasVisual) {
+          state.busy = "첨부 미디어 정밀 분석 중… (실패해도 접수는 계속됩니다)";
+          render();
+          analyzeDraftMedia(text).then(function (findings) {
+            state.busy = null;
+            startAnalysis(text, eq, findings);
+            render();
+          });
+          return; // 비동기 경로 — render 는 완료 시점에
+        }
+        startAnalysis(text, eq, null);
         break;
       }
+
+      /* 음성 녹음 (2차 고도화) */
+      case "record-start": startRecording(); return; // 자체 비동기 render
+      case "record-stop": stopRecording(); return;   // onstop → finishRecording → render
+      case "remove-media": removeDraftMedia(el.getAttribute("data-id")); break;
+      case "dismiss-notice": state.notice = null; break;
+
+      /* 설정 */
+      case "open-settings": state.settingsOpen = true; break;
+      case "close-settings": state.settingsOpen = false; break;
+      case "save-settings": {
+        settings.stt_engine = document.getElementById("set-stt").value;
+        settings.whisper_key = document.getElementById("set-whisper-key").value.trim();
+        settings.vision_provider = document.getElementById("set-vision").value;
+        settings.vision_key = document.getElementById("set-vision-key").value.trim();
+        settings.vision_model = document.getElementById("set-vision-model").value.trim();
+        Settings.save(settings);
+        state.settingsOpen = false;
+        state.notice = "설정이 저장되었습니다. (키는 이 브라우저에만 보관)";
+        break;
+      }
+
+      /* 음성 세그먼트 재생 (E-02 근거 점프 보조) */
+      case "play-seg": {
+        var segMediaId = el.getAttribute("data-media");
+        var segMs = parseInt(el.getAttribute("data-ms"), 10) || 0;
+        state.activeSeg = { media_id: segMediaId, index: parseInt(el.getAttribute("data-index"), 10) };
+        syncOpinionForm();
+        render();
+        playAudioSegment(segMediaId, segMs);
+        return;
+      }
+      case "zoom-img": el.classList.toggle("zoomed"); return;
       case "safety-submit": {
         // 안전 분기: 질문 없이 긴급 접수 (FR-05)
         var d = state.draft;
@@ -841,15 +1378,28 @@
         break;
       }
 
-      /* E-02 근거 점프 */
-      case "jump":
+      /* E-02 근거 점프: 원문 하이라이트 + (음성 유래면) 해당 세그먼트부터 오디오 재생 */
+      case "jump": {
         state.hl = {
           input_id: el.getAttribute("data-input"),
           start: parseInt(el.getAttribute("data-start"), 10),
           end: parseInt(el.getAttribute("data-end"), 10)
         };
+        state.activeSeg = null;
+        var seekTo = null;
+        (issue.attachments || []).forEach(function (att, ai) {
+          if (seekTo || att.kind !== "audio" || !att.transcript) return;
+          var seg = E.media.segmentForRange(att.transcript, state.hl.start, state.hl.end);
+          if (seg) {
+            state.activeSeg = { media_id: att.media_id, index: att.transcript.indexOf(seg) };
+            seekTo = { media_id: att.media_id, ms: seg.start_ms };
+          }
+        });
         syncOpinionForm();
-        break;
+        render();
+        if (seekTo) playAudioSegment(seekTo.media_id, seekTo.ms);
+        return;
+      }
 
       /* E-03 AI 분석 */
       case "run-ai": {
@@ -983,6 +1533,14 @@
       syncOpinionForm();
       render();
     }
+    if (ev.target.id === "input-image" || ev.target.id === "input-video") {
+      var file = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if (file) attachFile(file);
+    }
+  });
+  root.addEventListener("input", function (ev) {
+    if (ev.target.id === "input-text") state.c01Text = ev.target.value; // 재렌더에도 입력 유지
   });
 
   document.getElementById("mode-reporter").addEventListener("click", function () {
@@ -992,10 +1550,17 @@
     state.mode = "expert"; state.view = "e01"; state.hl = null; render();
   });
   document.getElementById("btn-reset").addEventListener("click", function () {
-    if (!confirm("모든 로컬 데이터를 초기화할까요?")) return;
+    if (!confirm("모든 로컬 데이터(이슈 + 첨부 미디어)를 초기화할까요?")) return;
     Store.reset();
     db = Store.load();
+    if (window.FI_MEDIA) window.FI_MEDIA.clear().catch(function () {});
     state.mode = "reporter"; state.view = "c04"; state.current = null; state.draft = null;
+    state.draftMedia = []; state.c01Text = ""; state.mediaURLs = {}; state.notice = null;
+    render();
+  });
+  var settingsBtn = document.getElementById("btn-settings");
+  if (settingsBtn) settingsBtn.addEventListener("click", function () {
+    state.settingsOpen = !state.settingsOpen;
     render();
   });
   document.getElementById("btn-load-seed").addEventListener("click", function () {

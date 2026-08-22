@@ -28,6 +28,7 @@ function loadPlaywright() {
 }
 
 const ROOT = path.join(__dirname, "..");
+const SHOT_DIR = process.env.E2E_SHOT_DIR || __dirname; // 스크린샷 저장 위치
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -76,8 +77,28 @@ async function clickOption(page, label) {
   const server = await startServer();
   const base = "http://127.0.0.1:" + server.address().port;
   const executablePath = fs.existsSync("/opt/pw-browsers/chromium") ? "/opt/pw-browsers/chromium" : undefined;
-  const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({
+    executablePath,
+    args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"]
+  });
   const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
+  // Web Speech API 는 headless 에서 동작하지 않으므로 가짜 SpeechRecognition 주입(STT 어댑터가 __FI_TEST_SR 우선 사용)
+  await page.addInitScript(() => {
+    window.__FI_TEST_SR = class {
+      constructor() { this.onresult = null; this.onend = null; this.onerror = null; }
+      start() {
+        this._t = setTimeout(() => {
+          if (!this.onresult) return;
+          const results = [Object.assign(
+            [{ transcript: "붐을 내리고 오른쪽으로 돌면 가끔 덜컹거립니다." }],
+            { isFinal: true }
+          )];
+          this.onresult({ resultIndex: 0, results });
+        }, 250);
+      }
+      stop() { clearTimeout(this._t); if (this.onend) this.onend(); }
+    };
+  });
   page.on("dialog", (d) => d.accept());
   page.on("pageerror", (e) => console.error("  [pageerror]", e.message));
 
@@ -214,7 +235,83 @@ async function clickOption(page, label) {
     assert.ok(issue.user_input.original_text.indexOf("덜컹거립니다") >= 0, "원본 불변(DP-1)");
     ok("저장 검증: 상태 이력 체인 · SW-HYD-0412 · Knowledge 1건 · 원본 보존");
 
-    console.log("\nE2E 통과: 전체 루프 1회전 완료 (" + step + "단계)\n");
+    /* ───────── [C] 2차 고도화: 음성 녹음+STT, 이미지 첨부, IndexedDB, 음성 근거 점프 ───────── */
+    console.log("\n[C] 음성·미디어 접수 — 녹음/STT/IndexedDB/세그먼트 근거 점프");
+    await page.evaluate(() => Promise.all([
+      Promise.resolve(localStorage.clear()),
+      window.FI_MEDIA.clear()
+    ]));
+    await page.reload();
+    await page.click("#btn-new-issue");
+    await page.screenshot({ path: path.join(SHOT_DIR, "c01-voice.png"), fullPage: true });
+
+    // 녹음 시작 → 오버레이 + 가짜 STT 실시간 전사 → 텍스트 자동 삽입
+    await page.click("#btn-record");
+    await page.waitForSelector("#rec-overlay", { timeout: 8000 });
+    await page.waitForFunction(() => {
+      const ta = document.getElementById("input-text");
+      return ta && ta.value.indexOf("덜컹거립니다") >= 0;
+    }, null, { timeout: 8000 });
+    ok("C-01: 녹음 시작(가짜 마이크) → 오버레이 표시 + STT 전사 텍스트 자동 삽입");
+
+    // 녹음 정지 → 오디오 Blob 이 IndexedDB 에 저장되고 첨부 목록에 표시
+    await page.click("#btn-record-stop");
+    await waitText(page, "#draft-attachments", "음성 녹음 1");
+    await waitText(page, "#draft-attachments", "전사 1구간");
+    assert.strictEqual(await page.evaluate(() => window.FI_MEDIA.count()), 1, "IndexedDB 오디오 1건");
+    ok("C-01: 녹음 정지 → IndexedDB 저장(1건) + 첨부 목록(전사 세그먼트 포함)");
+
+    // 이미지 첨부 (1×1 PNG 실제 파일)
+    const PNG_1PX = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64");
+    await page.setInputFiles("#input-image", { name: "현장사진.png", mimeType: "image/png", buffer: PNG_1PX });
+    await waitText(page, "#draft-attachments", "현장사진.png");
+    assert.strictEqual(await page.evaluate(() => window.FI_MEDIA.count()), 2, "IndexedDB 이미지 포함 2건");
+    await page.screenshot({ path: path.join(SHOT_DIR, "c01-attached.png"), fullPage: true });
+    ok("C-01: 이미지 첨부(setInputFiles) → 썸네일 + IndexedDB 2건");
+
+    // 질문 3개 → 확인 → 접수 (텍스트는 STT 로 채워진 값 그대로)
+    await page.selectOption("#select-equipment", "0");
+    await page.click("#btn-analyze");
+    await waitText(page, "#q-progress", "(1/3)");
+    await clickOption(page, "가끔");
+    await clickOption(page, "시동 직후");
+    await clickOption(page, "없음");
+    await waitText(page, "#view-c03", "이렇게 이해했습니다");
+    await waitText(page, "#view-c03", "첨부 (2건)");
+    await page.click(".btn-confirm-ok");
+    await page.click("#btn-submit-issue");
+    await waitText(page, "#cdetail-status", "배정됨");
+    ok("C-02/03: STT 텍스트로 동일 질문 3개 → 첨부 2건 표시 → 접수(ASSIGNED)");
+
+    // 전문가 상세: 첨부 원본(오디오+세그먼트 칩+이미지) 표시, 근거 점프 시 세그먼트 활성
+    await page.click("#mode-expert");
+    await page.locator("#queue-active .btn-open").first().click();
+    await waitText(page, "#issue-attachments", "음성 녹음 1");
+    assert.ok(await page.locator("#issue-attachments audio").count() >= 1, "오디오 플레이어");
+    assert.ok(await page.locator("#issue-attachments img.att-thumb").count() >= 1, "이미지 썸네일");
+    assert.ok(await page.locator(".seg-chip").count() >= 1, "전사 세그먼트 칩");
+    await page.locator(".evidence-link").first().click();
+    await page.waitForSelector("#original-text mark.hl", { timeout: 8000 });
+    await page.waitForSelector(".seg-chip.seg-active", { timeout: 8000 });
+    await page.screenshot({ path: path.join(SHOT_DIR, "e02-media.png"), fullPage: true });
+    ok("E-02: 근거 링크 클릭 → 원문 하이라이트 + 해당 음성 세그먼트 활성(재생 지점 매핑)");
+
+    // 저장 구조 검증: 첨부 참조 + 전사 char 매핑 (Blob 은 IndexedDB, Issue 엔 참조만 — DP-1)
+    const mediaDb = await page.evaluate(() => JSON.parse(localStorage.getItem("field_insight_db_v1")));
+    const mIssue = mediaDb.issues[mediaDb.issues.length - 1];
+    assert.strictEqual(mIssue.attachments.length, 2);
+    const voiceAtt = mIssue.attachments.filter((a) => a.kind === "audio")[0];
+    assert.strictEqual(voiceAtt.input_type, "voice");
+    assert.ok(voiceAtt.media_id && !voiceAtt.blob, "Issue 에는 media_id 참조만 저장");
+    assert.strictEqual(voiceAtt.transcript.length, 1);
+    assert.strictEqual(voiceAtt.transcript[0].char_start, 0, "전사 세그먼트 ↔ 최종 텍스트 char 매핑");
+    assert.ok(voiceAtt.transcript[0].end_ms > 0, "세그먼트 타임스탬프(ms)");
+    assert.strictEqual(mIssue.user_input.input_type, "multimodal");
+    ok("저장 검증: 첨부 2건(참조만) · transcript {text,start_ms,end_ms,char_*} 스키마");
+
+    console.log("\nE2E 통과: 전체 루프 1회전 + 음성·미디어 접수 (" + step + "단계)\n");
     await browser.close();
     server.close();
     process.exit(0);

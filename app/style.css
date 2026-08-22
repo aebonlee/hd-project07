@@ -141,3 +141,46 @@ table.fields td.a { width: 44px; text-align: right; }
 .freeinput-row { display: flex; gap: 8px; margin-top: 10px; }
 .freeinput-row input { flex: 1; }
 .freeinput-row button { min-width: 84px; }
+
+/* ── 2차 고도화: 음성 녹음·미디어 첨부 ── */
+.record-btn {
+  width: 100%; min-height: 64px; border: 0; border-radius: 14px; cursor: pointer;
+  background: linear-gradient(135deg, #d7263d, #a4123a); color: #fff;
+  font-size: 19px; font-weight: 800; letter-spacing: .3px; margin-top: 4px;
+  box-shadow: 0 4px 14px rgba(215, 38, 61, .3);
+}
+.record-btn:active { transform: scale(.99); }
+.attach-row { display: flex; gap: 10px; margin-top: 10px; }
+.attach-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 52px; border: 1.5px dashed var(--line); border-radius: 12px;
+  background: #fbfcfd; font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.att-list { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.att-item { border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: #fbfcfd; }
+.att-item .att-head { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 6px; flex-wrap: wrap; }
+.att-item .att-remove { margin-left: auto; }
+.att-item audio { width: 100%; min-height: 44px; }
+.att-thumb { max-width: 160px; max-height: 120px; border-radius: 8px; display: block; cursor: zoom-in; }
+.att-thumb.zoomed { max-width: 100%; max-height: none; cursor: zoom-out; }
+.att-video { max-width: 100%; max-height: 260px; border-radius: 8px; display: block; }
+.seg-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.seg-chip {
+  text-align: left; min-height: 48px; padding: 8px 12px; border-radius: 10px;
+  border: 1px solid #bcd0ff; background: #f4f8ff; color: #1149b8; font-size: 14px; cursor: pointer;
+}
+.seg-chip.seg-active { background: #ffe08a; border-color: #d7a900; color: #6b5200; font-weight: 700; }
+
+/* 녹음 오버레이 — 화면 응시 최소화 */
+.rec-overlay {
+  position: fixed; inset: 0; z-index: 50; background: rgba(10, 14, 22, .93); color: #fff;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px;
+}
+.rec-pulse { font-size: 64px; animation: recpulse 1.2s ease-in-out infinite; }
+@keyframes recpulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.18); opacity: .75; } }
+.rec-time { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.rec-interim { max-width: 560px; text-align: center; font-size: 17px; line-height: 1.6; color: #cdd8e6; min-height: 54px; }
+.rec-stop {
+  min-height: 72px; min-width: 240px; border: 0; border-radius: 16px; cursor: pointer;
+  background: #d7263d; color: #fff; font-size: 20px; font-weight: 800;
+}
