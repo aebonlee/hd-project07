@@ -71,7 +71,38 @@
     el.style.cssText = 'padding:8px 16px;font-size:13px;line-height:1.5;text-align:center;'
       + 'background:' + m[1] + ';color:' + m[2] + ';border-bottom:1px solid rgba(0,0,0,.08)';
     el.textContent = m[0] + (detail ? ' ' + detail : '');
+    syncOffsets();
   }
+
+  /**
+   * 띠와 헤더의 **실제 높이**를 재서 CSS 변수로 알려 준다.
+   *
+   * 화면 위에 붙박이(position:fixed)로 놓인 것들은 보통 `top: 52px` 처럼
+   * 헤더 높이를 숫자로 박아 둔다. 그 위에 띠가 하나 끼어들거나 헤더 여백이
+   * 바뀌면 그 숫자가 틀려져 **붙박이 요소가 헤더를 덮는다.**
+   * 실제로 hd-project05 의 왼쪽 메뉴가 그렇게 덮였다.
+   * 숫자를 고쳐 박는 대신 잰 값을 넘겨, 무엇이 바뀌어도 따라오게 한다.
+   */
+  function syncOffsets() {
+    if (!root.document || !root.document.documentElement) return;
+    var el = root.document.getElementById('hd-conn-banner');
+    var header = root.document.querySelector('body > header');
+    var bh = el ? Math.round(el.getBoundingClientRect().height) : 0;
+    var hh = header ? Math.round(header.getBoundingClientRect().height) : 0;
+    var st = root.document.documentElement.style;
+    st.setProperty('--hd-banner-h', bh + 'px');
+    st.setProperty('--hd-header-h', hh + 'px');
+    st.setProperty('--hd-chrome-h', (bh + hh) + 'px');
+  }
+
+  // 글꼴이 늦게 오거나 창 크기가 바뀌면 높이도 바뀐다
+  if (root.addEventListener) {
+    root.addEventListener('resize', function () { syncOffsets(); });
+    if (root.document && root.document.fonts && root.document.fonts.ready) {
+      root.document.fonts.ready.then(function () { syncOffsets(); });
+    }
+  }
+
 
   /**
    * 문서를 받아 온다. 없으면 지금 브라우저에 있던 것으로 처음 한 번 올린다.
