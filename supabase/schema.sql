@@ -366,3 +366,35 @@ grant execute on function public.guard_knowledge()          to authenticated;
 --   select id, '<이름>', email, array['reporter','expert'] from auth.users where email = '<이메일>'
 --   on conflict (user_id) do nothing;
 -- ----------------------------------------------------------------------------
+
+-- ===============================================================
+-- 팀 공용 문서 (hd-docsync.js 용)
+--
+--   이 표 하나에 앱의 JSON 문서를 통째로 담아 팀원이 같은 것을 본다.
+--   팀 내부 도구 — 어차피 서로 다 보는 화면 — 에만 쓴다.
+--   사람마다 볼 범위가 달라야 하는 화면에는 쓸 수 없다(모두가 전부를 받게 된다).
+-- ===============================================================
+
+create table if not exists workspace (
+  id         text primary key,
+  doc        jsonb not null default '{}'::jsonb,
+  -- 동시 편집으로 남의 작업이 조용히 사라지지 않게 하는 장치.
+  -- 저장할 때 "내가 받아 온 버전"과 같은지 확인하고, 다르면 쓰지 않는다.
+  version    bigint not null default 1,
+  updated_at timestamptz not null default now(),
+  updated_by uuid default auth.uid()
+);
+
+alter table workspace enable row level security;
+
+drop policy if exists workspace_read   on workspace;
+drop policy if exists workspace_write  on workspace;
+drop policy if exists workspace_update on workspace;
+drop policy if exists workspace_delete on workspace;
+
+-- 팀 내부 도구라 로그인한 사람은 읽고 쓴다.
+-- 더 좁히려면 아래 정책의 using/with check 를 조직 규칙에 맞게 바꾸면 된다.
+create policy workspace_read   on workspace for select to authenticated using (true);
+create policy workspace_write  on workspace for insert to authenticated with check (true);
+create policy workspace_update on workspace for update to authenticated using (true) with check (true);
+-- DELETE 정책은 두지 않는다. 팀 자료를 화면에서 통째로 지울 수 있으면 안 된다.

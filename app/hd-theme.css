@@ -32,10 +32,11 @@
   --hd-ink-3:  #64748b;   /* 4.76:1 */
 
   /* 강조 — 프로젝트마다 이 두 줄만 바꾸면 색이 바뀐다 */
-  /* hd-project07 */
-  --accent:      #0f6e6e;
-  --accent-deep: #0a5252;
-  --accent-soft: #e4f2f2;
+  /* hd-project07 — 이 앱이 원래 쓰던 파랑 계열.
+     청록을 얹었더니 헤더만 청록이고 버튼은 파랑이라 색이 갈렸다. */
+  --accent:      #1149b8;
+  --accent-deep: #0d3a8f;
+  --accent-soft: #eaf0fb;
   --on-accent:   #ffffff;
 
   /* 상태 */
@@ -757,3 +758,10 @@ body.hd.hd-app > header .kpi:hover {
   border-color: rgba(255, 255, 255, .45);
   background: rgba(255, 255, 255, .18);
 }
+
+/* 프로젝트가 쓰던 자체 변수도 같은 계열로 묶는다. */
+:root {
+  --brand: #1149b8;   /* 원래 #0f62fe — 흰 글자 대비가 5.0 이라 한 단계 진하게 */
+  --chip:  #eaf0fb;
+}
+/* 위험·경고는 브랜드와 다른 색이어야 한다. 여기서는 건드리지 않는다. */
