@@ -476,6 +476,133 @@ atest("OpenAI 형식: image_url data URI + json_object, 오류 응답은 예외�
   await assert.rejects(() => bad.analyzeMedia({ images: ["data:image/png;base64,BBBB"] }), /401/);
 });
 
+/* ══════════════════════ 서버 연결층 (fi-supabase.js) ══════════════════════
+   이 파일은 브라우저용 UMD 가 아니라 window 에 붙는 스크립트라
+   vm 으로 가짜 window 를 만들어 읽어 들인다. */
+const FIS = (() => {
+  const sandbox = { self: null, window: null, FI: { statemachine: sm }, APP_CONFIG: {} };
+  sandbox.self = sandbox; sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(root, "app/fi-supabase.js"), "utf8"), sandbox);
+  return sandbox.FISupabase;
+})();
+
+// vm 안에서 만들어진 배열은 프로토타입이 달라 deepStrictEqual 이 구조가 같아도 실패한다.
+// 이쪽 realm 의 배열로 옮겨 담고 비교한다.
+const arr = (x) => (x == null ? x : Array.from(x));
+
+test("상태 경로: 접수 직후 ASSIGNED 까지 한 칸씩 간다", () => {
+  // 화면은 접수 한 번에 DRAFT→SUBMITTED→ASSIGNED 로 간다.
+  // DB 는 한 걸음씩만 허용하므로 어댑터가 길을 펴야 한다.
+  assert.deepStrictEqual(arr(FIS.pathTo("DRAFT", "ASSIGNED")), ["SUBMITTED", "ASSIGNED"]);
+});
+
+test("상태 경로: 제자리는 빈 배열", () => {
+  assert.deepStrictEqual(arr(FIS.pathTo("IN_REVIEW", "IN_REVIEW")), []);
+});
+
+test("상태 경로: 종결 상태는 어디서든 한 걸음", () => {
+  assert.deepStrictEqual(arr(FIS.pathTo("DRAFT", "STALE")), ["STALE"]);
+});
+
+test("상태 경로: 되돌릴 수 없는 곳은 null", () => {
+  // KNOWLEDGE_READY 에서 나가는 길이 없다 — 없는 길을 억지로 만들면 안 된다
+  assert.strictEqual(FIS.pathTo("KNOWLEDGE_READY", "IN_REVIEW"), null);
+});
+
+test("상태 경로: 실제 한 바퀴가 전부 이어진다", () => {
+  const legs = [["DRAFT","ASSIGNED"],["ASSIGNED","IN_REVIEW"],["IN_REVIEW","ANSWERED"],
+                ["ANSWERED","RESOLVED"],["RESOLVED","KNOWLEDGE_READY"]];
+  for (const [a, b] of legs) {
+    const p = FIS.pathTo(a, b);
+    assert.ok(p && p.length, a + " → " + b + " 길이 없다");
+    // 각 칸이 실제로 허용된 전이인지 정본으로 확인
+    let cur = a;
+    for (const step of p) {
+      assert.ok(sm.canTransition(cur, step), cur + " → " + step + " 는 정본이 막는 길이다");
+      cur = step;
+    }
+  }
+});
+
+test("결론 4필드: 미확정이어도 빈 칸이 나오지 않는다", () => {
+  // DB 제약이 4필드 모두 비어 있지 않기를 요구한다.
+  // 빈 문자열을 보내면 저장이 통째로 실패하는데 화면에는 이유가 안 보인다.
+  const c = FIS.conclusionOf({
+    expert_opinion: {
+      cause_undetermined: true, cause_undetermined_reason_label: "추가 계측 필요",
+      action_type: "점검", action_detail: "", rationale_text: "", prevention: ""
+    }
+  });
+  for (const k of ["root_cause", "action", "evidence", "prevention"]) {
+    assert.ok(c[k] && c[k].trim().length > 0, k + " 가 비어 있다");
+  }
+  assert.ok(/미확정/.test(c.root_cause));
+});
+
+test("결론 4필드: 확정이면 계통·부품이 원인으로 들어간다", () => {
+  const c = FIS.conclusionOf({
+    expert_opinion: {
+      cause_undetermined: false, cause_system_label: "유압", cause_part_label: "메인펌프",
+      action_type: "교체", action_detail: "메인펌프 교체", rationale_text: "압력 측정",
+      prevention: "월 1회 점검"
+    }
+  });
+  assert.strictEqual(c.root_cause, "유압 / 메인펌프");
+  assert.strictEqual(c.action, "메인펌프 교체");
+});
+
+test("결론이 없으면 null — 없는 것을 만들어 보내지 않는다", () => {
+  assert.strictEqual(FIS.conclusionOf({}), null);
+  assert.strictEqual(FIS.replyOf({}), null);
+  assert.strictEqual(FIS.resolutionOf({}), null);
+});
+
+test("해결 확인: 마지막 응답이 정본이다", () => {
+  // 미해결 → 재개 → 해결 순으로 답했으면 결과는 '해결'이어야 한다
+  const r = FIS.resolutionOf({ feedback: [
+    { result: "unresolved", comment: "그대로입니다" },
+    { result: "resolved", comment: "정상 작동합니다" }
+  ]});
+  assert.strictEqual(r.confirmed, true);
+  assert.strictEqual(r.comment, "정상 작동합니다");
+});
+
+test("회신: 승인·발송 시각을 그대로 옮긴다", () => {
+  const r = FIS.replyOf({ customer_response: {
+    simplified_response: "배터리를 교체했습니다.",
+    approved_at: "2026-08-25T01:00:00.000Z", delivered_at: "2026-08-25T01:05:00.000Z"
+  }});
+  assert.strictEqual(r.body, "배터리를 교체했습니다.");
+  assert.ok(r.approved_at && r.sent_at);
+});
+
+test("설정이 비어 있으면 서버 모드로 켜지지 않는다", () => {
+  // 값이 없는데 켜지면 화면이 통째로 안 뜬다. 데모로 내려가는 것이 맞다.
+  assert.strictEqual(FIS.available(), false);
+});
+
+/* ── schema.sql 이 상태 정본과 어긋나지 않는가 ─────────────────────────── */
+test("schema.sql 의 상태 정의가 engine/statemachine.js 와 일치한다", () => {
+  const sql = fs.readFileSync(path.join(root, "supabase/schema.sql"), "utf8");
+  // 허용 상태 목록
+  const m = /check \(status in \(([^)]*)\)\)/.exec(sql);
+  assert.ok(m, "schema.sql 에서 상태 목록 제약을 찾지 못했다");
+  const inSql = m[1].split(",").map(x => x.trim().replace(/^'|'$/g, "")).sort();
+  assert.deepStrictEqual(inSql, sm.STATES.slice().sort(),
+    "DB 가 허용하는 상태와 화면의 상태가 다르다 — node tools/build-sql-states.js 를 돌릴 것");
+
+  // 전이표: 정본에 있는 길이 SQL 에도 있어야 한다
+  for (const from of sm.STATES) {
+    const tos = (sm.TRANSITIONS[from] || []).filter(t => sm.GLOBAL_TARGETS.indexOf(t) === -1);
+    if (!tos.length) continue;
+    const line = new RegExp("p_from = '" + from + "' and p_to in \\(([^)]*)\\)").exec(sql);
+    assert.ok(line, from + " 의 전이가 schema.sql 에 없다");
+    const sqlTos = line[1].split(",").map(x => x.trim().replace(/^'|'$/g, "")).sort();
+    assert.deepStrictEqual(sqlTos, tos.slice().sort(), from + " 의 전이 목록이 다르다");
+  }
+});
+
 (async () => {
   for (const t of asyncTests) {
     try {

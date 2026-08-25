@@ -37,8 +37,9 @@ create table if not exists public.issue (
   title         text not null,
   raw_text      text not null,                    -- 현장 사용자가 쓴 원문(전문용어 없이)
   structured    jsonb not null default '{}'::jsonb, -- AI 가 정형화한 결과
-  status        text not null default 'DRAFT'
-                check (status in ('DRAFT','IN_REVIEW','CONCLUDED','REPLIED','RESOLVED','CLOSED')),
+  -- 허용 상태 목록은 아래 GENERATED 구간이 제약으로 붙인다.
+  -- 여기에 손으로 적으면 engine/statemachine.js 와 갈라진다 (실제로 갈라져 있었다).
+  status        text not null default 'DRAFT',
   reporter_id   uuid,
   expert_id     uuid,
   equipment     text,
@@ -47,8 +48,10 @@ create table if not exists public.issue (
   updated_at    timestamptz not null default now(),
   resolved_at   timestamptz,
   -- 해결 확인이 되었으면 시각이 있어야 한다. 둘이 어긋나면 Knowledge 판정이 흔들린다.
+  -- 해결 확인이 되었으면 시각이 있어야 한다. 둘이 어긋나면 Knowledge 판정이 흔들린다.
+  -- 해결로 보는 상태는 RESOLVED 와 그 뒤(KNOWLEDGE_READY) 두 가지다.
   constraint issue_resolved_consistency
-    check ((status in ('RESOLVED','CLOSED')) = (resolved_at is not null))
+    check ((status in ('RESOLVED','KNOWLEDGE_READY')) = (resolved_at is not null))
 );
 create index if not exists issue_status_idx on public.issue (status, created_at desc);
 
@@ -168,53 +171,88 @@ $fn$;
  * 다만 **건너뛰기는 막는다** — 접수 상태에서 바로 해결로 갈 수 없다.
  * 화면에서만 막으면 API 를 직접 부르는 순간 뚫린다.
  */
+-- <<<GENERATED:STATES:BEGIN>>>
+-- ⚠ 이 구간은 engine/statemachine.js 에서 자동 생성됩니다. 손으로 고치지 마세요.
+--    고칠 곳은 engine/statemachine.js 이고, 그다음
+--    `node tools/build-sql-states.js` 를 돌리면 여기가 다시 구워집니다.
+--    (어긋나면 `npm test` 가 잡습니다 — tests/unit.test.js)
+
+alter table public.issue drop constraint if exists issue_status_valid;
+alter table public.issue add constraint issue_status_valid
+  check (status in ('DRAFT', 'SUBMITTED', 'ASSIGNED', 'IN_REVIEW', 'PENDING_FIELD', 'ANSWERED', 'RESOLVED', 'REOPENED', 'KNOWLEDGE_READY', 'MERGED', 'STALE', 'CLOSED_UNVERIFIED'));
+
 create or replace function public.can_transition(p_from text, p_to text)
 returns boolean language sql immutable set search_path = public as $fn$
   select case
     when p_from = p_to then true
-    when p_from = 'DRAFT'     and p_to = 'IN_REVIEW' then true
-    when p_from = 'IN_REVIEW' and p_to in ('CONCLUDED','DRAFT') then true
-    when p_from = 'CONCLUDED' and p_to in ('REPLIED','IN_REVIEW') then true
-    when p_from = 'REPLIED'   and p_to in ('RESOLVED','CONCLUDED') then true
-    -- 재발하면 되돌린다. 고객이 한 번 확인했어도 같은 증상이 다시 나는 일이 있고,
-    -- 그때 새 이슈로 다시 접수하게 하면 이력이 끊긴다.
-    when p_from = 'RESOLVED'  and p_to in ('CLOSED', 'REPLIED') then true
+    when p_to in ('MERGED', 'STALE', 'CLOSED_UNVERIFIED') then true   -- 어디서든 진입 가능
+    when p_from = 'DRAFT' and p_to in ('SUBMITTED') then true
+    when p_from = 'SUBMITTED' and p_to in ('ASSIGNED') then true
+    when p_from = 'ASSIGNED' and p_to in ('IN_REVIEW') then true
+    when p_from = 'IN_REVIEW' and p_to in ('PENDING_FIELD', 'ANSWERED') then true
+    when p_from = 'PENDING_FIELD' and p_to in ('IN_REVIEW') then true
+    when p_from = 'ANSWERED' and p_to in ('RESOLVED', 'REOPENED') then true
+    when p_from = 'RESOLVED' and p_to in ('KNOWLEDGE_READY') then true
+    when p_from = 'REOPENED' and p_to in ('IN_REVIEW') then true
     else false
   end;
 $fn$;
+-- <<<GENERATED:STATES:END>>>
+
 
 create or replace function public.guard_transition()
 returns trigger language plpgsql set search_path = public as $fn$
 begin
+  -- ── 전이 규칙 (UPDATE 일 때만) ─────────────────────────────────────
   if tg_op = 'UPDATE' and new.status is distinct from old.status then
     if not public.can_transition(old.status, new.status) then
       raise exception '허용되지 않는 상태 전이입니다: % → %', old.status, new.status;
     end if;
-    -- CONCLUDED 로 가려면 결론 4필드가 있어야 한다
-    if new.status = 'CONCLUDED'
-       and not exists (select 1 from public.conclusion c where c.issue_id = new.id) then
-      raise exception '결론(확정원인·조치·근거·재발방지)이 없으면 CONCLUDED 로 갈 수 없습니다.';
+  end if;
+
+  -- ── 관문 (INSERT·UPDATE 양쪽) ──────────────────────────────────────
+  --   ⚠ INSERT 에도 건다. UPDATE 에만 걸면 **처음부터 ANSWERED 로 만들어 넣는**
+  --      길이 열려, 결론도 회신도 없이 "답변 완료"인 이슈가 생긴다.
+  --   그래서 앱은 이슈를 먼저 넣고(초기 상태) → 결론·회신·확인을 넣고 →
+  --   마지막에 상태를 올린다. 그 순서라야 관문이 실제로 지켜진다.
+  if tg_op = 'INSERT' or new.status is distinct from old.status then
+
+    -- ANSWERED = 전문가 결론이 나오고 고객 회신이 승인된 상태.
+    -- 둘 중 하나라도 없으면 "답변이 갔다"고 말할 수 없다.
+    if new.status = 'ANSWERED' then
+      if not exists (select 1 from public.conclusion c where c.issue_id = new.id) then
+        raise exception '결론(확정원인·조치·근거·재발방지)이 없으면 ANSWERED 로 갈 수 없습니다.';
+      end if;
+      if not exists (select 1 from public.reply r
+                      where r.issue_id = new.id and r.approved_at is not null) then
+        raise exception '승인된 회신이 없으면 ANSWERED 로 갈 수 없습니다.';
+      end if;
     end if;
-    -- REPLIED 로 가려면 승인된 회신이 있어야 한다
-    if new.status = 'REPLIED'
-       and not exists (select 1 from public.reply r
-                        where r.issue_id = new.id and r.approved_at is not null) then
-      raise exception '승인된 회신이 없으면 REPLIED 로 갈 수 없습니다.';
-    end if;
-    if new.status in ('RESOLVED','CLOSED') and new.resolved_at is null then
-      new.resolved_at := now();
-    end if;
-    if new.status not in ('RESOLVED','CLOSED') then
-      new.resolved_at := null;
+
+    -- RESOLVED = **고객이 해결을 확인한** 상태. 전문가가 혼자 닫을 수 없다.
+    if new.status in ('RESOLVED','KNOWLEDGE_READY')
+       and not exists (select 1 from public.resolution r
+                        where r.issue_id = new.id and r.confirmed) then
+      raise exception '고객의 해결 확인이 없으면 % 로 갈 수 없습니다.', new.status;
     end if;
   end if;
+
+  -- 해결 시각은 상태에서 따라 나온다 — 손으로 넣게 두면 둘이 어긋난다
+  if new.status in ('RESOLVED','KNOWLEDGE_READY') then
+    if new.resolved_at is null then new.resolved_at := now(); end if;
+  else
+    new.resolved_at := null;
+  end if;
+
   new.updated_at := now();
   return new;
 end;
 $fn$;
 
 drop trigger if exists issue_guard on public.issue;
-create trigger issue_guard before update on public.issue
+-- INSERT 에도 건다. UPDATE 에만 걸면 **처음부터 ANSWERED 로 만들어 넣는** 길이 열려
+-- 결론도 회신도 없이 "답변 완료"인 이슈가 생긴다.
+create trigger issue_guard before insert or update on public.issue
   for each row execute function public.guard_transition();
 
 /**
@@ -225,7 +263,7 @@ create or replace function public.guard_knowledge()
 returns trigger language plpgsql set search_path = public as $fn$
 declare v_ok boolean;
 begin
-  select coalesce(r.confirmed, false) and i.status in ('RESOLVED','CLOSED')
+  select coalesce(r.confirmed, false) and i.status in ('RESOLVED','KNOWLEDGE_READY')
     into v_ok
     from public.issue i
     left join public.resolution r on r.issue_id = i.id

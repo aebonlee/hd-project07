@@ -15,7 +15,7 @@
 | 저장소 어디에도 접속 정보가 없다 | 각자 값이 다르기 때문입니다. `app/config.js` 가 비어 있는 채로 들어 있고, 그 파일을 본인 값으로 채우는 것이 이 문서의 목적입니다. |
 | 회사 데이터를 넣지 않습니다 | 교육용 계정입니다. 사내 자료는 사내 승인 절차를 거친 뒤에 다루세요. |
 
-**지금 이 저장소 상태: 연결 마무리 필요.** 접속 설정 파일은 들어 있지만 화면에 아직 붙이지 않았습니다. 아래 1~3단계까지 그대로 진행한 뒤, 마지막 「4-B. 화면에 붙이기」를 함께 하시면 됩니다.
+**지금 이 저장소 상태: 바로 쓸 수 있음.** 화면이 이미 Supabase 를 부르도록 되어 있습니다. 아래 절차대로 **값 두 개만 채우면** 서버 모드로 바뀝니다.
 
 ---
 
@@ -26,8 +26,7 @@
 - 데모 모드로 두면: 한 사람이 전체 흐름을 혼자 돌려 보는 것까지 됩니다. 실제 인계는 안 됩니다.
 - 서버 모드가 필요한 이유: **현장 → 전문가 → 고객**으로 넘어가는 흐름이라 여러 사람이 같은 이슈를 이어받습니다. 브라우저에만 저장하면 넘길 상대가 없습니다.
 
-> 이 저장소는 화면이 아직 Supabase 를 부르지 않으므로 **지금은 연결 여부를 알리는 띠가 없습니다.**
-> 화면을 붙이고 나면 생깁니다. 그 전까지는 아래 2장의 확인 쿼리로 표가 잘 만들어졌는지만 보면 됩니다.
+화면 맨 위에 지금 어느 모드인지 **띠**로 적혀 있습니다. 헷갈리면 그것을 보세요.
 
 ---
 
@@ -128,26 +127,9 @@ root.APP_CONFIG = {
 > 예: `https://aebonlee.github.io/hd-project07/app/?supabase=1`
 > (이 방법도 값 두 개는 채워 두어야 동작합니다)
 
-### 4-B. 화면에 붙이기 (이 프로젝트만 남은 작업)
-
-`app/index.html` 의 `</body>` 앞, 앱 스크립트보다 **먼저** 세 줄을 넣습니다.
-
-```html
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<script src="config.js"></script>
-<script src="hd-docsync.js"></script>
-```
-
-순서가 중요합니다 — 설정보다 앱이 먼저 뜨면 앱은 설정이 없는 줄 알고 데모 모드로 갑니다.
-수업에서 함께 붙입니다.
-
 ---
 
 ## 5. 됐는지 확인하기
-
-> **아직 화면이 붙지 않은 단계입니다.** 여기까지 왔다면 확인할 것은 하나입니다 —
-> 2장의 확인 쿼리를 돌려 표 11개가 다 보이면 준비 끝입니다.
-> 아래 내용은 화면을 붙인 다음(수업 시간)에 쓰는 것입니다.
 
 1. **https://aebonlee.github.io/hd-project07/app/** 를 새로고침합니다.
 2. 화면 맨 위 띠를 봅니다.
@@ -183,10 +165,35 @@ root.APP_CONFIG = {
 이 앱은 **누가 접속했는지에 따라 보이는 것이 달라집니다.** 그래서 계정이 있어야 제대로 돌아갑니다.
 
 대시보드 **Authentication → Users → Add user → Create new user** 에서 만듭니다.
+시험용이라면 **Auto Confirm User** 를 켜세요 — 확인 메일을 기다리지 않아도 됩니다.
 
-- 이메일이 아닌 것(업체코드·사번)으로 로그인하는 화면은 `코드@도메인` 꼴의 **가상 이메일**로 계정을 만듭니다.
-  어떤 도메인을 쓸지는 `app/config.js` 의 `AUTH_EMAIL_DOMAIN` 에 적혀 있습니다. 계정도 **같은 규칙**으로 만들어야 맞물립니다.
-- 시험용이라면 **Auto Confirm User** 를 켜서 만드세요. 확인 메일을 기다리지 않아도 됩니다.
+**이 앱은 이메일·비밀번호로 로그인합니다.** 업체코드 같은 가상 이메일을 쓰지 않으므로
+`AUTH_EMAIL_DOMAIN` 은 건드릴 필요가 없습니다.
+
+### 역할을 반드시 등록하세요
+
+계정만 만들고 역할을 안 넣으면 **로그인은 되는데 접수자·전문가 버튼이 둘 다 사라집니다.**
+(화면 위 띠가 "역할이 없습니다" 라고 알려 줍니다)
+
+```sql
+-- 현장 접수자
+insert into public.app_user (user_id, name, email, roles)
+select id, '홍길동', email, array['reporter']
+  from auth.users where email = 'field@example.com'
+on conflict (user_id) do update set roles = excluded.roles;
+
+-- 전문가
+insert into public.app_user (user_id, name, email, roles)
+select id, '김전문', email, array['expert']
+  from auth.users where email = 'expert@example.com'
+on conflict (user_id) do update set roles = excluded.roles;
+```
+
+### 이 앱의 진짜 확인 방법
+
+**계정 두 개로 각각 로그인해 보세요.** 접수자로 이슈를 올리고, 전문가 계정으로
+**다른 브라우저(또는 시크릿 창)** 에서 열었을 때 그 이슈가 보이면 된 것입니다.
+같은 브라우저에서는 데모 모드여도 보이기 때문에 확인이 되지 않습니다.
 
 ---
 

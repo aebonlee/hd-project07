@@ -12,7 +12,13 @@
   var adapter = E.mockai.createMockAdapter(S.parts);
   var MNT = S.maintenance;
 
-  /** 데모 사용자 — 역할은 사람 단위가 아니라 화면 모드 단위(원문 3장). 단일 사용자 하드코딩은 Phase 1 범위 */
+  /**
+   * 지금 쓰고 있는 사람.
+   * 데모 모드에서는 아래 값 그대로(계정 없음), 서버 모드에서는 **로그인한 계정**과
+   * app_user 표의 역할로 갈아 끼운다. 역할이 하나면 모드 토글도 그 하나만 남는다 —
+   * 접수자에게 전문가 화면을 열어 두면 "볼 수는 있는데 저장은 막히는" 상태가 되어
+   * 무엇이 잘못됐는지 알 수 없다.
+   */
   var USER = { name: "김현장", roles: ["reporter", "expert"] };
 
   /** 자유 입력(현상 설명·전문가 자유 서술) 최대 길이 */
@@ -26,7 +32,12 @@
     { model: "DX140W", sn: "0087", hours: 1250 }
   ];
 
-  /* ────────────────────────── 저장 계층 (Phase 2 교체 지점) ────────────────────────── */
+  /* ────────────────────────── 저장 계층 ──────────────────────────
+     데모 모드 : 이 브라우저에만 (localStorage)
+     서버 모드 : Supabase — 현장이 접수한 것을 전문가가 이어받는다
+     둘 다 화면 코드는 그대로다. 저장 위치만 다르다. */
+  var SERVER = false;
+
   var Store = {
     KEY: "field_insight_db_v1",
     empty: function () { return { issues: [], knowledge: [], next_no: 1024 }; },
@@ -37,7 +48,12 @@
       } catch (e) { return this.empty(); }
     },
     save: function (db) {
+      // 브라우저에는 항상 남긴다 — 서버가 잠깐 안 되어도 입력한 것이 사라지지 않게.
       try { localStorage.setItem(this.KEY, JSON.stringify(db)); } catch (e) { /* 저장 불가 환경 */ }
+      // 서버 모드면 바뀐 이슈만 올린다. 실패하면 조용히 넘기지 않고 띠에 적는다.
+      if (SERVER && window.FISupabase) {
+        window.FISupabase.saveDb(db).catch(function () { /* 알림은 어댑터가 한다 */ });
+      }
     },
     reset: function () {
       try { localStorage.removeItem(this.KEY); } catch (e) {}
@@ -1582,5 +1598,137 @@
     render();
   });
 
-  render();
+  /* ══════════════════════════ 연결·로그인 ══════════════════════════
+
+     데모 모드와 서버 모드를 화면 위 **띠 하나**로 구분해 알린다.
+     지금 어디에 저장되는지 모르고 쓰면, 나중에 "입력한 게 사라졌다"가 된다.
+     ─────────────────────────────────────────────────────────────── */
+
+  function banner(kind, detail) {
+    var el = document.getElementById("fi-conn");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "fi-conn";
+      el.setAttribute("role", "status");
+      document.body.insertBefore(el, document.body.firstChild);
+    }
+    var map = {
+      connecting: ["서버에 연결하는 중…", "#e8edf3", "#334155"],
+      server: ["서버에 연결됨 — 접수한 이슈를 전문가가 이어받습니다.", "#e3f4ec", "#0a6045"],
+      login: ["로그인이 필요합니다.", "#e8edf3", "#334155"],
+      demo: ["이 브라우저에만 저장됩니다 — 다른 사람에게는 보이지 않습니다.", "#fdf4e3", "#7a4f00"]
+    };
+    var m = map[kind] || map.demo;
+    el.style.cssText = "padding:8px 16px;font-size:13px;line-height:1.5;text-align:center;"
+      + "background:" + m[1] + ";color:" + m[2] + ";border-bottom:1px solid rgba(0,0,0,.08)";
+    el.textContent = m[0] + (detail ? " " + detail : "");
+  }
+
+  /** 역할에 없는 모드는 버튼째 감춘다 (열어 두면 저장만 막혀 이유를 알 수 없다) */
+  function applyRoles() {
+    var r = USER.roles || [];
+    var only = SERVER && r.length > 0;
+    var mr = document.getElementById("mode-reporter");
+    var me_ = document.getElementById("mode-expert");
+    if (mr) mr.hidden = only && r.indexOf("reporter") === -1;
+    if (me_) me_.hidden = only && r.indexOf("expert") === -1 && r.indexOf("admin") === -1;
+    if (mr && mr.hidden && state.mode === "reporter") { state.mode = "expert"; state.view = "e01"; }
+    if (me_ && me_.hidden && state.mode === "expert") { state.mode = "reporter"; state.view = "c04"; }
+  }
+
+  function paintWho() {
+    var slot = document.getElementById("auth-slot");
+    if (!slot) return;
+    if (!SERVER) { slot.innerHTML = ""; return; }
+    var roles = (USER.roles || []).join("·") || "역할 없음";
+    slot.innerHTML =
+      '<span class="auth-who">' + esc(USER.name) + ' <span class="role">' + esc(roles) + '</span></span>' +
+      '<button id="btn-signout" class="util" type="button">로그아웃</button>';
+    var b = document.getElementById("btn-signout");
+    if (b) b.addEventListener("click", function () {
+      window.FISupabase.signOut().then(function () { location.reload(); });
+    });
+  }
+
+  /** 로그인 화면 — 서버 모드인데 세션이 없을 때만 본문 자리에 그린다 */
+  function renderLogin(msg) {
+    banner("login");
+    root.innerHTML =
+      '<section class="card" style="max-width:420px;margin:32px auto">' +
+        '<h2>로그인</h2>' +
+        '<p class="muted">현장에서 접수한 이슈를 전문가가 이어받으려면 계정이 필요합니다. ' +
+          '계정은 관리자가 Supabase 대시보드에서 만들어 줍니다.</p>' +
+        (msg ? '<p class="warn-line" style="color:#c8341f">' + esc(msg) + '</p>' : '') +
+        '<label class="fld" for="li-email">이메일</label>' +
+        '<input id="li-email" type="text" autocomplete="username" inputmode="email">' +
+        '<label class="fld" for="li-pw">비밀번호</label>' +
+        '<input id="li-pw" type="password" autocomplete="current-password">' +
+        '<div style="margin-top:14px"><button id="li-go" class="primary" type="button">로그인</button></div>' +
+      '</section>';
+    var go = document.getElementById("li-go");
+    var pw = document.getElementById("li-pw");
+    function submit() {
+      var em = (document.getElementById("li-email") || {}).value || "";
+      var pass = (pw || {}).value || "";
+      if (!em.trim() || !pass) { renderLogin("이메일과 비밀번호를 모두 입력하세요."); return; }
+      go.disabled = true; go.textContent = "확인 중…";
+      window.FISupabase.signIn(em.trim(), pass)
+        .then(startServer)
+        .catch(function (e) {
+          renderLogin("로그인하지 못했습니다 — " + ((e && e.message) || e));
+        });
+    }
+    if (go) go.addEventListener("click", submit);
+    if (pw) pw.addEventListener("keydown", function (ev) { if (ev.key === "Enter") submit(); });
+  }
+
+  /** 로그인 뒤 — 내 역할을 읽고 서버 자료로 화면을 채운다 */
+  function startServer() {
+    banner("connecting");
+    return window.FISupabase.loadMe().then(function (m) {
+      if (m) USER = { name: m.name || m.email, roles: m.roles || [] };
+      if (!m || !(m.roles || []).length) {
+        banner("server", "이 계정은 아직 역할이 없습니다 — 관리자에게 app_user 등록을 요청하세요.");
+      }
+      return window.FISupabase.loadDb();
+    }).then(function (loaded) {
+      SERVER = true;
+      window.FISupabase.setMode("server");
+      db = loaded;
+      banner("server");
+      applyRoles();
+      paintWho();
+      state.view = state.mode === "expert" ? "e01" : "c04";
+      render();
+    }).catch(function (err) {
+      var msg = (err && err.message) || String(err);
+      var hint = /relation .* does not exist|schema cache/i.test(msg)
+        ? " supabase/schema.sql 을 SQL Editor 에서 실행했는지 확인하세요."
+        : "";
+      banner("demo", "(연결 실패: " + msg + ")" + hint);
+      SERVER = false;
+      render();
+    });
+  }
+
+  function boot() {
+    if (window.FISupabase) {
+      window.FISupabase.onNotify(function (msg) { banner("demo", "(" + msg.split("\n")[0] + ")"); });
+    }
+    if (!window.FISupabase || !window.FISupabase.available()) {
+      banner("demo");
+      render();
+      return;
+    }
+    banner("connecting");
+    window.FISupabase.session().then(function (sess) {
+      if (!sess) { renderLogin(); return; }
+      return startServer();
+    }).catch(function (e) {
+      banner("demo", "(연결 실패: " + ((e && e.message) || e) + ")");
+      render();
+    });
+  }
+
+  boot();
 })();

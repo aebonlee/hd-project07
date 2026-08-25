@@ -8,17 +8,26 @@
 <!-- 공통 디자인 시스템. 반드시 기존 CSS 뒤에 온다 —
      특정도가 같으면 나중에 온 쪽이 이기므로 순서가 곧 우선순위다. -->
 <link rel="stylesheet" href="hd-theme.css">
+<!-- 공통 테마에 지는 것만 되돌린다. 반드시 hd-theme.css 뒤. -->
+<link rel="stylesheet" href="overrides.css">
 </head>
 <body class="hd hd-app">
   <header class="topbar">
-    <h1>Field-Insight <small>MVP-1 · 정비 도메인</small></h1>
-    <div class="mode-toggle" role="group" aria-label="화면 모드 전환(user.roles[])">
-      <button id="mode-reporter" type="button">접수자</button>
-      <button id="mode-expert" type="button">전문가</button>
+    <!-- 로고는 왼쪽, 조작부는 오른쪽. 가운데 폭 제한은 .topbar-inner 가 맡는다.
+         (공통 테마는 `> .topbar-inner` 가 있는 헤더에는 자기 여백을 넣지 않는다) -->
+    <div class="topbar-inner">
+      <h1 class="topbar-brand">Field-Insight <small>MVP-1 · 정비 도메인</small></h1>
+      <div class="topbar-actions">
+        <div class="mode-toggle" role="group" aria-label="화면 모드 전환(user.roles[])">
+          <button id="mode-reporter" type="button">접수자</button>
+          <button id="mode-expert" type="button">전문가</button>
+        </div>
+        <button id="btn-load-seed" class="util" type="button" title="원문 15장 ISSUE #1024 시나리오를 IN_REVIEW 상태로 로드">시드 데모</button>
+        <button id="btn-settings" class="util" type="button" title="STT 엔진·미디어 정밀 분석 설정">⚙ 설정</button>
+        <button id="btn-reset" class="util" type="button" title="저장소 + 미디어 저장소 초기화">초기화</button>
+        <span id="auth-slot" class="auth-slot"></span>
+      </div>
     </div>
-    <button id="btn-load-seed" class="util" type="button" title="원문 15장 ISSUE #1024 시나리오를 IN_REVIEW 상태로 로드">시드 데모</button>
-    <button id="btn-settings" class="util" type="button" title="STT 엔진·미디어 정밀 분석 설정">⚙ 설정</button>
-    <button id="btn-reset" class="util" type="button" title="LocalStorage + 미디어 저장소 초기화">초기화</button>
   </header>
 
   <main id="root" aria-live="polite"></main>
@@ -39,6 +48,11 @@
   <script src="mediastore.js"></script>
   <!-- 시드: 원문 15장 End-to-End 시나리오 (ISSUE #1024) -->
   <script src="../seed/issue1024.js"></script>
+  <!-- 서버 연결(선택) — 값이 비어 있으면 데모 모드로 그대로 돕니다.
+       config.js 에 본인 Supabase 값을 넣는 방법은 저장소의 SUPABASE-설정.md 참고. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script src="fi-supabase.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
