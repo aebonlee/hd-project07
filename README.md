@@ -2,6 +2,10 @@
 
 > 🌐 **배포 페이지: [https://aebonlee.github.io/hd-project07/](https://aebonlee.github.io/hd-project07/)** · 저장소: https://github.com/aebonlee/hd-project07
 
+> 🗄️ **Supabase 를 붙이려면 → [`SUPABASE-설정.md`](SUPABASE-설정.md)**
+> 데이터베이스는 **수강생 본인 계정**에 만듭니다. 계정 만들기부터 확인까지 단계별로 적어 두었습니다.
+
+
 > **한 줄 정의**: 현장 사용자가 전문용어 없이 현상을 설명하면 AI가 상황별 정보요건을 스스로 정해 **판단을 바꿀 질문 3개 이내**로 Issue를 정형화하고, 전문가가 근거 점프와 AI 보조 분석으로 **확정원인·조치·근거·재발방지 4필드** 결론을 내려 고객 언어로 승인·회신하며, **고객이 해결을 확인한 사례만 Knowledge로 축적**하는 플랫폼.
 
 - 기획: 정광호 (생성형 AI 업무자동화 전문가과정 — Field-Insight 시스템 개발계획서)
