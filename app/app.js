@@ -727,6 +727,26 @@
     }).join("") + '</div>';
   }
 
+  /**
+   * 지금 정밀 분석이 켜져 있는지 **첨부하는 자리에서** 알려 준다.
+   *
+   * 설정 화면까지 들어가야 알 수 있으면 아무도 확인하지 않는다.
+   * 그러면 키를 안 넣은 채 사진을 올리고 "왜 분석이 안 되지" 하게 된다.
+   * 꺼져 있어도 접수는 그대로 된다 — 규칙 엔진이 오프라인으로 돈다.
+   */
+  function visionStateHTML() {
+    var on = settings.vision_provider !== "none" && settings.vision_key;
+    var who = { openai: "OpenAI", claude: "Claude", solar: "Solar" }[settings.vision_provider]
+              || settings.vision_provider;
+    return '<div class="vision-state ' + (on ? "on" : "off") + '">' +
+      '<span>' + (on
+        ? '🔍 <b>정밀 분석 켜짐</b> — 첨부한 사진·영상을 ' + esc(who) + ' 가 함께 살펴봅니다.'
+        : '📴 <b>오프라인 규칙 엔진</b>으로 접수합니다 — 사진은 증거로 첨부만 됩니다.' +
+          ' API 키를 넣으면 사진 속 상태까지 읽습니다.') + '</span>' +
+      '<button type="button" data-action="open-settings">' +
+        (on ? "설정 보기" : "API 키 넣기") + '</button></div>';
+  }
+
   /* ── C-01 입력 + 장비 선택 + 음성/미디어 첨부 (2차 고도화: 핸즈프리 우선) ── */
   function viewC01() {
     var sttReady = E.stt.supported(window);
@@ -739,9 +759,17 @@
       '<p class="muted">화면을 보기 어려운 현장에서는 <b>음성으로 접수</b>를 누르고 말씀하세요. 전문용어는 필요 없습니다.</p>' +
       '<button class="record-btn" id="btn-record" data-action="record-start">🎤 음성으로 접수 (녹음 시작)</button>' +
       '<p class="muted" style="margin-top:4px">' + esc(sttHint) + '</p>' +
+      visionStateHTML() +
+      /* 현장에서는 방금 찍은 사진을 창에 끌어다 놓는 것이 가장 빠르다.
+         버튼도 함께 남긴다 — 휴대폰에서는 끌어다 놓기가 안 되고 카메라를 바로 여는 것이 낫다. */
+      '<label class="drop-media" id="drop-media">' +
+      '<input type="file" id="input-media" accept="image/*,video/*" multiple>' +
+      '<b>사진·영상을 끌어다 놓거나 눌러서 고르세요</b>' +
+      '<span>여러 장을 한 번에 넣을 수 있습니다 · 영상 최대 ' + E.media.formatBytes(E.media.LIMITS.video) + '</span>' +
+      '</label>' +
       '<div class="attach-row">' +
-      '<label class="attach-btn">📷 사진 첨부<input type="file" id="input-image" accept="image/*" capture="environment" hidden></label>' +
-      '<label class="attach-btn">🎬 영상 첨부 <span class="sr">(최대 ' + E.media.formatBytes(E.media.LIMITS.video) + ')</span><input type="file" id="input-video" accept="video/*" hidden></label>' +
+      '<label class="attach-btn">📷 카메라로 찍기<input type="file" id="input-image" accept="image/*" capture="environment" hidden></label>' +
+      '<label class="attach-btn">🎬 영상 고르기 <span class="sr">(최대 ' + E.media.formatBytes(E.media.LIMITS.video) + ')</span><input type="file" id="input-video" accept="video/*" hidden></label>' +
       '</div>' +
       attachmentListHTML(state.draftMedia, true) +
       '<label class="fld" for="input-text">현상 설명 (음성 전사 자동 삽입 · 직접 수정 가능)</label>' +
@@ -1587,14 +1615,54 @@
       syncOpinionForm();
       render();
     }
-    if (ev.target.id === "input-image" || ev.target.id === "input-video") {
-      var file = ev.target.files && ev.target.files[0];
+    if (ev.target.id === "input-image" || ev.target.id === "input-video"
+        || ev.target.id === "input-media") {
+      // 여러 장을 한 번에 고를 수 있다. 한 장씩만 받으면 현장에서 몇 번을 반복해야 한다.
+      var files = ev.target.files ? Array.prototype.slice.call(ev.target.files) : [];
       ev.target.value = "";
-      if (file) attachFile(file);
+      files.forEach(attachFile);
     }
   });
   root.addEventListener("input", function (ev) {
     if (ev.target.id === "input-text") state.c01Text = ev.target.value; // 재렌더에도 입력 유지
+  });
+
+  /* 끌어다 놓기.
+     화면을 다시 그릴 때마다 요소가 새로 생기므로, 개별 요소가 아니라
+     **root 에 한 번만** 걸어 두고 안쪽 요소를 찾아 처리한다.
+     (요소마다 걸면 다시 그린 뒤 조용히 동작하지 않는다) */
+  ["dragenter", "dragover"].forEach(function (t) {
+    root.addEventListener(t, function (ev) {
+      var z = ev.target.closest && ev.target.closest("#drop-media");
+      if (!z) return;
+      ev.preventDefault();
+      z.classList.add("over");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (t) {
+    root.addEventListener(t, function (ev) {
+      var z = ev.target.closest && ev.target.closest("#drop-media");
+      if (!z) return;
+      ev.preventDefault();
+      z.classList.remove("over");
+    });
+  });
+  root.addEventListener("drop", function (ev) {
+    var z = ev.target.closest && ev.target.closest("#drop-media");
+    if (!z) return;
+    ev.preventDefault();
+    var files = ev.dataTransfer && ev.dataTransfer.files
+      ? Array.prototype.slice.call(ev.dataTransfer.files) : [];
+    files.forEach(attachFile);
+  });
+
+  /* 창 밖으로 떨어뜨리면 브라우저가 그 파일을 열어 버려 **입력하던 내용이 날아간다.**
+     첨부 영역 밖에서는 아무 일도 일어나지 않게 막는다. */
+  ["dragover", "drop"].forEach(function (t) {
+    window.addEventListener(t, function (ev) {
+      if (ev.target.closest && ev.target.closest("#drop-media")) return;
+      ev.preventDefault();
+    });
   });
 
   document.getElementById("mode-reporter").addEventListener("click", function () {
@@ -1649,7 +1717,30 @@
     el.style.cssText = "padding:8px 16px;font-size:13px;line-height:1.5;text-align:center;"
       + "background:" + m[1] + ";color:" + m[2] + ";border-bottom:1px solid rgba(0,0,0,.08)";
     el.textContent = m[0] + (detail ? " " + detail : "");
+    syncChrome();
   }
+
+  /**
+   * 띠와 헤더의 **실제 높이**를 재서 CSS 변수로 알려 준다.
+   *
+   * 둘 다 fixed 라 흐름에서 빠졌으므로 본문을 그만큼 내려야 첫 줄이 안 가린다.
+   * 높이를 숫자로 박아 두면 띠 문구가 길어져 두 줄이 되는 순간 어긋난다 —
+   * 좁은 화면에서 실제로 그렇게 된다. 그래서 잰 값을 쓴다.
+   */
+  function syncChrome() {
+    var el = document.getElementById("fi-conn");
+    var header = document.querySelector("body > header");
+    var bh = el ? Math.round(el.getBoundingClientRect().height) : 0;
+    var hh = header ? Math.round(header.getBoundingClientRect().height) : 0;
+    var st = document.documentElement.style;
+    st.setProperty("--fi-banner-h", bh + "px");
+    st.setProperty("--fi-header-h", hh + "px");
+    st.setProperty("--fi-chrome-h", (bh + hh) + "px");
+  }
+
+  // 글꼴이 늦게 오거나 창 크기가 바뀌면 높이도 바뀐다
+  window.addEventListener("resize", syncChrome);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncChrome);
 
   /** 역할에 없는 모드는 버튼째 감춘다 (열어 두면 저장만 막혀 이유를 알 수 없다) */
   function applyRoles() {
