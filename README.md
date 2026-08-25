@@ -177,6 +177,21 @@ node tools/build-sql-states.js --check  # 어긋나 있으면 1 로 죽는다
 - 관문은 `INSERT` 에도 걸려 있다. `UPDATE` 에만 걸면 처음부터 `ANSWERED` 로
   만들어 넣는 길이 열려 결론도 회신도 없는 "답변 완료" 가 생긴다.
 
+### 첨부 미디어 — 비공개 버킷 + 서명 주소
+
+현장이 찍은 사진·녹음이 브라우저(IndexedDB)에만 있으면 **전문가에게 넘어가지 않는다.**
+서버 모드에서는 원본을 Supabase Storage 의 `field-insight` 버킷으로 올리고,
+참조를 `attachment` 표에 남긴다.
+
+- **비공개 버킷**이다. 주소를 알아도 그냥은 못 받고, 볼 때마다 **한 시간짜리 서명 주소**를
+  발급받아 `<img>`/`<audio>` 에 물린다. 현장 사진에 사업장·설비가 찍히므로 공개로 두면 안 된다.
+- 이 기기에 원본이 있으면 IndexedDB Blob 을 그대로 쓰고, **없으면(남이 올린 것) 서버에서 받아 온다.**
+  이 갈래가 없으면 전문가 화면에서 현장 사진이 통째로 비어 보인다.
+- **지우는 정책은 두지 않았다.** 원본 미디어는 판단의 근거다 — 화면에서 지울 수 있으면
+  사후에 근거가 사라진다.
+- 첨부 하나가 실패해도 **이슈 저장은 살린다.** 전문가가 남의 이슈를 고칠 때 그 기기에는
+  첨부 원본이 없는데, 그것 때문에 저장이 통째로 죽으면 안 된다.
+
 ### 역할
 
 `app_user.roles` 에 없는 모드는 **버튼째 감춘다.**
@@ -199,6 +214,11 @@ node tools/build-sql-states.js --check  # 어긋나 있으면 1 로 죽는다
 # Intent/안전 감지, Gap 분석(15장 Step 2 재현), 질문 3개 제한·'하' 제외, Mock AI(빈/널 입력 가드 포함), 스키마 동기화,
 # (2차) 파일 검증·프레임 계산·transcript char 매핑·STT 세그먼트 타이밍·Whisper 파서·비전 어댑터
 node tests/unit.test.js
+
+# 서버 모드 통합 (진짜 PostgreSQL + 진짜 schema.sql + 고치지 않은 fi-supabase.js)
+./scripts/sqltest/run-server-test.sh
+# 단위는 어댑터 계산만, SQL 하네스는 DB 규칙만 본다. 둘이 맞물리는 지점
+# (컬럼 이름·저장 순서·상태 경로·첨부 업로드)은 여기서만 잡힌다.
 
 # E2E (Playwright/Chromium, 18단계): 시드 재현 + 15장 전체 루프 1회전(텍스트 경로)
 #   + (2차) 가짜 마이크 녹음/정지, STT 자동 삽입(주입형 SpeechRecognition), 이미지 첨부(setInputFiles),

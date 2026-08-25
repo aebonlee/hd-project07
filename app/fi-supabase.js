@@ -158,6 +158,68 @@
     });
   }
 
+  /* ─────────────────────────────── 첨부 ──────────────────────────────── */
+  /**
+   * 현장이 찍은 사진·녹음은 브라우저(IndexedDB)에만 있으면 **전문가에게 넘어가지
+   * 않는다.** 이 앱은 넘기는 것이 목적이므로 원본을 서버에 올린다.
+   *
+   * 버킷은 비공개다 — 주소를 알아도 그냥은 못 받는다.
+   * 볼 때마다 짧게 사는 **서명 주소**를 받아 <img>/<audio> 에 물린다.
+   * 현장 사진에는 사업장·설비가 찍히므로 공개 버킷으로 두면 안 된다.
+   */
+  var BUCKET = 'field-insight';
+  var signedCache = {};   // storage_path → { url, exp }
+
+  function mediaPath(issueCode, mediaId, mime) {
+    var ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
+                 'video/mp4': 'mp4', 'video/webm': 'webm',
+                 'audio/webm': 'webm', 'audio/mpeg': 'mp3', 'audio/wav': 'wav' })[mime] || 'bin';
+    // 코드에 '#'·공백이 들어 있다 — 경로에 그대로 쓰면 주소가 깨진다
+    var safe = String(issueCode).replace(/[^A-Za-z0-9_-]+/g, '-');
+    return safe + '/' + mediaId + '.' + ext;
+  }
+
+  /** 이미 올라가 있으면 다시 올리지 않는다(upsert 라 덮어써도 안전하지만 헛일이다). */
+  function uploadMedia(issueCode, rec) {
+    if (!rec || !rec.blob) return Promise.resolve(null);
+    var path = mediaPath(issueCode, rec.media_id, rec.mime);
+    return db().storage.from(BUCKET)
+      .upload(path, rec.blob, { contentType: rec.mime || 'application/octet-stream', upsert: true })
+      .then(function (r) {
+        if (r.error) throw r.error;
+        return path;
+      });
+  }
+
+  /**
+   * 서명 주소를 받아 온다. 한 시간짜리라 캐시하되 **만료 5분 전에 새로 받는다** —
+   * 딱 맞춰 두면 재생 도중 끊긴다.
+   */
+  function signedUrl(path) {
+    var now = Date.now();
+    var c = signedCache[path];
+    if (c && c.exp - now > 5 * 60 * 1000) return Promise.resolve(c.url);
+    return db().storage.from(BUCKET).createSignedUrl(path, 3600).then(function (r) {
+      if (r.error) throw r.error;
+      var url = r.data && (r.data.signedUrl || r.data.signedURL);
+      signedCache[path] = { url: url, exp: now + 3600 * 1000 };
+      return url;
+    });
+  }
+
+  /** 이 이슈의 첨부 목록 (media_id → storage_path) */
+  function attachmentPaths(issueCode) {
+    var id = dbIdByCode[issueCode];
+    if (id == null) return Promise.resolve({});
+    return db().from('attachment').select('file_name, storage_path').eq('issue_id', id)
+      .then(function (r) {
+        if (r.error) throw r.error;
+        var map = {};
+        (r.data || []).forEach(function (a) { map[a.file_name] = a.storage_path; });
+        return map;
+      });
+  }
+
   /* ─────────────────────────────── 쓰기 ──────────────────────────────── */
 
   function conclusionOf(issue) {
@@ -230,6 +292,23 @@
       if (rp) { rp.issue_id = id; jobs.push(db().from('reply').upsert(rp, { onConflict: 'issue_id' })); }
       var rs = resolutionOf(issue);
       if (rs) { rs.issue_id = id; jobs.push(db().from('resolution').upsert(rs, { onConflict: 'issue_id' })); }
+
+      // 첨부 — 원본은 Storage 로, 참조는 attachment 표로.
+      // 여기서 올려 두어야 전문가가 다른 기기에서 열어도 사진·녹음이 보인다.
+      var atts = (issue.attachments || []).filter(function (a) { return a.media_id; });
+      if (atts.length && root.FI_MEDIA) {
+        jobs.push(Promise.all(atts.map(function (a) {
+          return root.FI_MEDIA.get(a.media_id).then(function (rec) {
+            if (!rec || !rec.blob) return null;            // 이 기기에 원본이 없다(남이 올린 것)
+            return uploadMedia(code, rec).then(function (path) {
+              return db().from('attachment').upsert({
+                issue_id: id, kind: a.kind === 'voice' ? 'audio' : (a.kind || 'file'),
+                file_name: a.media_id, storage_path: path, size_bytes: a.size || null
+              }, { onConflict: 'issue_id,file_name' });
+            });
+          }).catch(function () { return null; });          // 첨부 하나가 실패해도 이슈 저장은 살린다
+        })).then(function () { return { error: null }; }));
+      }
 
       // 질문은 최대 3개 — 있으면 같이 남긴다(근거 점프에 쓰인다)
       var qs = (issue.questions || []).slice(0, 3).map(function (q, i) {
@@ -306,6 +385,8 @@
     available: available, client: db,
     signIn: signIn, signOut: signOut, session: session, loadMe: loadMe, whoami: whoami,
     loadDb: loadDb, saveDb: saveDb, pathTo: pathTo,
+    uploadMedia: uploadMedia, signedUrl: signedUrl,
+    attachmentPaths: attachmentPaths, mediaPath: mediaPath,
     conclusionOf: conclusionOf, replyOf: replyOf, resolutionOf: resolutionOf,
     mode: getMode, setMode: setMode, onNotify: onNotify
   };

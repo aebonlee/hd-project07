@@ -130,7 +130,10 @@ create table if not exists public.attachment (
   file_name  text not null,
   storage_path text,
   size_bytes bigint,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- 같은 첨부를 다시 올려도 행이 늘어나면 안 된다.
+  -- upsert 가 기댈 제약이 여기 없으면 **저장이 조용히 실패**한다(§3.7).
+  constraint attachment_uniq unique (issue_id, file_name)
 );
 
 create table if not exists public.log (
@@ -171,6 +174,15 @@ $fn$;
  * 다만 **건너뛰기는 막는다** — 접수 상태에서 바로 해결로 갈 수 없다.
  * 화면에서만 막으면 API 를 직접 부르는 순간 뚫린다.
  */
+-- 기존에 만들어 둔 표에도 붙인다 (create table if not exists 는 제약을 더해 주지 않는다)
+do $att$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'attachment_uniq') then
+    alter table public.attachment add constraint attachment_uniq unique (issue_id, file_name);
+  end if;
+end;
+$att$;
+
 -- <<<GENERATED:STATES:BEGIN>>>
 -- ⚠ 이 구간은 engine/statemachine.js 에서 자동 생성됩니다. 손으로 고치지 마세요.
 --    고칠 곳은 engine/statemachine.js 이고, 그다음
@@ -404,6 +416,47 @@ grant execute on function public.guard_knowledge()          to authenticated;
 --   select id, '<이름>', email, array['reporter','expert'] from auth.users where email = '<이메일>'
 --   on conflict (user_id) do nothing;
 -- ----------------------------------------------------------------------------
+
+-- ============================================================================
+-- 첨부 미디어 저장소 (Supabase Storage)
+--
+--   현장이 찍은 사진·녹음이 브라우저(IndexedDB)에만 있으면 **전문가에게 넘어가지
+--   않는다.** 이 앱은 넘기는 것이 목적이므로 원본을 서버에 둬야 한다.
+--
+--   비공개 버킷이다. 주소를 알아도 그냥은 못 받고, 로그인한 사람에게만
+--   짧게 사는 서명 주소를 발급해 준다. 현장 사진에 사업장·설비가 찍히므로
+--   공개 버킷으로 두면 안 된다.
+--
+--   ⚠ storage 스키마는 Supabase 에만 있다. 로컬 검증용 PostgreSQL 에는 없으므로
+--     있을 때만 실행한다 — 없다고 스키마 전체가 멈추면 안 된다.
+-- ============================================================================
+do $storage$
+begin
+  if not exists (select 1 from pg_namespace where nspname = 'storage') then
+    raise notice 'storage 스키마가 없어 첨부 저장소 설정을 건너뜁니다 (로컬 검증 환경).';
+    return;
+  end if;
+
+  insert into storage.buckets (id, name, public)
+  values ('field-insight', 'field-insight', false)
+  on conflict (id) do update set public = false;   -- 실수로 공개로 바뀌어도 되돌린다
+
+  execute $p$drop policy if exists fi_media_read on storage.objects$p$;
+  execute $p$drop policy if exists fi_media_write on storage.objects$p$;
+  execute $p$drop policy if exists fi_media_update on storage.objects$p$;
+
+  -- 로그인한 사람은 읽고 올린다. 사내 정비 이슈라 서로 보는 것이 정상이다.
+  execute $p$create policy fi_media_read on storage.objects
+            for select to authenticated using (bucket_id = 'field-insight')$p$;
+  execute $p$create policy fi_media_write on storage.objects
+            for insert to authenticated with check (bucket_id = 'field-insight')$p$;
+  -- 덮어쓰기(upsert)를 허용하되 지우는 정책은 두지 않는다.
+  -- 원본 미디어는 판단의 근거다 — 화면에서 지울 수 있으면 사후에 근거가 사라진다.
+  execute $p$create policy fi_media_update on storage.objects
+            for update to authenticated
+            using (bucket_id = 'field-insight') with check (bucket_id = 'field-insight')$p$;
+end;
+$storage$;
 
 -- ===============================================================
 -- 팀 공용 문서 (hd-docsync.js 용)

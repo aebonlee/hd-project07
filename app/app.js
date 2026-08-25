@@ -169,7 +169,13 @@
 
   function mediaURL(mediaId) { return state.mediaURLs[mediaId] || null; }
 
-  /** 렌더 후 [data-media-src] 요소에 IndexedDB Blob 을 objectURL 로 연결 */
+  /**
+   * 렌더 후 [data-media-src] 요소에 실제 미디어를 물린다.
+   *
+   * 이 기기에 원본이 있으면(내가 찍은 것) IndexedDB Blob 을 그대로 쓴다.
+   * **없으면 — 남이 올린 것이다.** 서버 모드에서는 비공개 버킷의 서명 주소를 받아 온다.
+   * 이 갈래가 없으면 전문가 화면에서 현장 사진이 통째로 비어 보인다.
+   */
   function hydrateMedia() {
     var els = root.querySelectorAll("[data-media-src]");
     Array.prototype.forEach.call(els, function (el) {
@@ -177,12 +183,33 @@
       var cached = mediaURL(id);
       if (cached) { if (el.src !== cached) el.src = cached; return; }
       window.FI_MEDIA.get(id).then(function (rec) {
-        if (!rec || !rec.blob) return;
-        var url = URL.createObjectURL(rec.blob);
-        state.mediaURLs[id] = url;
-        el.src = url;
-      }).catch(function () {});
+        if (rec && rec.blob) {
+          var url = URL.createObjectURL(rec.blob);
+          state.mediaURLs[id] = url;
+          el.src = url;
+          return;
+        }
+        return hydrateFromServer(id, el);
+      }).catch(function () { return hydrateFromServer(id, el); });
     });
+  }
+
+  /** 이 기기에 없는 첨부를 서버에서 받아 온다 (서버 모드에서만) */
+  function hydrateFromServer(mediaId, el) {
+    if (!SERVER || !window.FISupabase) return;
+    var issue = state.current != null ? getIssue(state.current) : null;
+    if (!issue) return;
+    return window.FISupabase.attachmentPaths("ISSUE #" + issue.issue_id)
+      .then(function (map) {
+        var path = map[mediaId];
+        if (!path) return;
+        return window.FISupabase.signedUrl(path).then(function (url) {
+          if (!url) return;
+          state.mediaURLs[mediaId] = url;
+          el.src = url;
+        });
+      })
+      .catch(function () { /* 못 받아도 화면은 그대로 — 나머지는 보인다 */ });
   }
 
   /** 음성 근거 점프: 해당 오디오를 세그먼트 시작 지점부터 재생 */
