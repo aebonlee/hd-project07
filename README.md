@@ -115,9 +115,73 @@ tests/   ─ 단위(node) + E2E(Playwright)
 | 교체 대상 | 현재(Phase 1) | Phase 2 | 방법 |
 |---|---|---|---|
 | AI | `mockai.createMockAdapter()` (규칙/템플릿) | Local LLM | `analyzeIssue / draftStructuredOpinion / rewriteForCustomer` 3개 메서드를 가진 어댑터로 교체. 화면·상태머신·스키마는 그대로 |
-| 저장소 | `app/app.js` 의 `Store` (LocalStorage) | 서버/DB | `Store.load/save/reset` 인터페이스 유지한 채 구현만 교체 |
+| 저장소 | `app/app.js` 의 `Store` (LocalStorage) | **Supabase — 구현 완료** | `app/fi-supabase.js`. `Store` 인터페이스는 그대로 두고 저장 위치만 바뀐다 |
 | 입력 | 텍스트 char offset + **음성 세그먼트 ms**(2차 구현) | word-level timestamp | `transcript[]` 스키마 동일 — 로컬 Whisper 등으로 세그먼트를 word 로 상세화만 하면 됨 |
 | 유사사례 | `mockai.js` 의 `MOCK_CASES` | Local Vector DB | 검증(RESOLVED) 사례만 색인(DP-8) |
+
+## 5-1. 여러 사람이 실제로 주고받게 하기 (서버 모드)
+
+기본은 **데모 모드**다 — 이 브라우저에만 저장되고, 혼자 전체 흐름을 돌려 볼 수 있다.
+그런데 이 앱의 목적은 **현장 → 전문가 → 고객**으로 이슈가 넘어가는 것이라,
+자료가 각자 브라우저에만 있으면 넘길 상대가 없다.
+
+`app/config.js` 에 본인 Supabase 값을 넣으면 **서버 모드**가 된다.
+절차는 저장소 루트의 [`SUPABASE-설정.md`](SUPABASE-설정.md) 에 단계별로 있다.
+화면 맨 위 띠가 지금 어느 모드인지 늘 알려 준다.
+
+### 담는 방식 — 컬럼과 jsonb 를 겹쳐 쓴다
+
+이슈 하나는 화면에서 깊게 중첩된 객체다(원본·질문·결론·회신·감사이력…).
+표 여러 개로 완전히 쪼개면 화면 코드 1,586줄을 다시 써야 한다. 그래서 둘을 겹친다.
+
+| | 어디에 | 왜 |
+|---|---|---|
+| 상태·접수자·장비·코드 | **진짜 컬럼** | RLS 와 상태 관문이 이 값들을 보고 판단한다 |
+| 나머지 전부 | `issue.structured` (jsonb) | 화면 코드는 받은 그대로 쓰고 아무것도 잃지 않는다 |
+
+**상태의 정본은 컬럼이다.** `structured` 안에도 status 가 들어 있지만 그것은 흔적일 뿐이라,
+읽어 올 때 컬럼 값으로 덮어쓴다. 둘을 다 믿으면 어긋난 순간 어느 쪽이 맞는지 알 수 없다.
+
+### 상태를 한 칸씩 올리는 이유
+
+DB 의 `can_transition()` 은 **한 걸음씩만** 허용한다(건너뛰기 방지).
+그런데 화면은 접수 한 번에 `DRAFT → SUBMITTED → ASSIGNED` 까지 간다.
+그래서 어댑터가 목표까지의 길을 찾아 **한 칸씩** UPDATE 한다.
+한 번에 밀어 넣으면 트리거가 막고, 막는 것이 맞다.
+
+저장 순서도 정해져 있다 — **① 이슈 행 → ② 결론·회신·해결확인 → ③ 상태 올리기.**
+순서를 바꾸면 "결론이 없으면 ANSWERED 로 갈 수 없습니다" 로 막힌다.
+
+### 상태 정의는 한 곳에서만 고친다
+
+`engine/statemachine.js` 가 정본이고, `supabase/schema.sql` 의
+`<<<GENERATED:STATES>>>` 구간은 거기서 굽는다.
+
+```bash
+node tools/build-sql-states.js          # 다시 굽는다
+node tools/build-sql-states.js --check  # 어긋나 있으면 1 로 죽는다
+```
+
+두 곳에 손으로 적어 두었더니 실제로 갈라져 있었다 —
+화면은 12개 상태로 도는데 DB 는 화면에 없는 이름 6개만 허용해서,
+그대로 연결했으면 **첫 접수부터 저장이 통째로 실패**하고 화면에는 이유가 안 보였을 것이다.
+`npm test`(단위)가 이 어긋남을 잡는다.
+
+### DB 가 직접 지키는 것
+
+화면에서만 막으면 다른 경로로 들어온 값이 그대로 통과한다. 그래서 트리거에도 둔다.
+
+- `ANSWERED` — 결론 4필드 + **승인된** 회신이 있어야 한다
+- `RESOLVED` — **고객의 해결 확인**이 있어야 한다 (전문가가 혼자 닫을 수 없다)
+- Knowledge — 고객이 확인한 사례만 들어온다
+- 관문은 `INSERT` 에도 걸려 있다. `UPDATE` 에만 걸면 처음부터 `ANSWERED` 로
+  만들어 넣는 길이 열려 결론도 회신도 없는 "답변 완료" 가 생긴다.
+
+### 역할
+
+`app_user.roles` 에 없는 모드는 **버튼째 감춘다.**
+열어 두면 화면은 보이는데 저장만 막혀 무엇이 잘못됐는지 알 수 없다.
+계정을 만들고 역할을 등록하는 SQL 은 `SUPABASE-설정.md` 7장에 있다.
 
 ## 6. 스키마 확장 방법 — Domain 추가
 
