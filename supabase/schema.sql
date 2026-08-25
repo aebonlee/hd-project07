@@ -296,7 +296,14 @@ create trigger knowledge_guard before insert or update on public.knowledge
 -- 3. 뷰
 -- ----------------------------------------------------------------------------
 
-create or replace view public.issue_view as
+
+-- ⚠ 뷰에는 `with (security_invoker = true)` 를 붙인다.
+--   붙이지 않으면 뷰는 **만든 사람(postgres)의 권한**으로 돌아, 뷰를 읽을 수 있는
+--   사람이 밑에 깔린 표의 RLS 를 통째로 지나친다. 표만 잠그고 뷰를 안 잠그면 헛일이다.
+--   (hd-project03 에서 실제로 남의 업체 실사 결과가 뷰로 그대로 보였다.
+--    tests/server.test.js 의 "업체는 보고서 뷰로도 남의 자료를 볼 수 없다" 가 잡는다)
+--   security_invoker 는 PostgreSQL 15 부터. Supabase 는 15 이상이다.
+create or replace view public.issue_view with (security_invoker = true) as
 select i.*,
        (select count(*) from public.question q where q.issue_id = i.id) as question_count,
        (select count(*) from public.attachment a where a.issue_id = i.id) as attachment_count,
@@ -311,12 +318,12 @@ left join public.resolution rs on rs.issue_id = i.id
 left join public.knowledge k   on k.issue_id  = i.id;
 
 -- Knowledge 후보 — 해결 확인은 됐는데 아직 안 올린 것
-create or replace view public.knowledge_candidates as
+create or replace view public.knowledge_candidates with (security_invoker = true) as
 select id, code, title, root_cause, action, prevention, resolved_at
 from public.issue_view
 where customer_confirmed is true and in_knowledge = false;
 
-create or replace view public.status_summary as
+create or replace view public.status_summary with (security_invoker = true) as
 select status, count(*) as cnt from public.issue group by status;
 
 -- ----------------------------------------------------------------------------
