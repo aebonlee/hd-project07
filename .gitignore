@@ -1,2 +1,5 @@
 node_modules/
 tests/e2e-failure.png
+# tests/e2e.test.js 가 단계마다 스크린샷을 남긴다. 산출물이라 커밋하지 않는다.
+# (E2E_SHOT_DIR 로 저장 위치를 옮길 수 있다)
+tests/*.png
