@@ -51,6 +51,12 @@ function startServer() {
   });
 }
 
+// reload 때마다 공지 레이어 팝업이 새로 뜬다(localStorage 를 지우므로) — 매번 닫아야 아래 클릭이 막히지 않는다.
+async function dismissNotice(page) {
+  const notice = page.locator("#hd-notice-close");
+  if (await notice.count()) await notice.click();
+}
+
 async function waitText(page, selector, substr) {
   await page.waitForFunction(
     ([sel, sub]) => {
@@ -111,6 +117,7 @@ async function clickOption(page, label) {
     await page.goto(base + "/app/index.html");
     await page.evaluate(() => localStorage.clear());
     await page.reload();
+    await dismissNotice(page);
     await page.click("#btn-load-seed");
     await waitText(page, "#queue-active", "#1024");
     await waitText(page, "#queue-active", "검토 중");
@@ -126,6 +133,7 @@ async function clickOption(page, label) {
     console.log("\n[B] 전체 루프 1회전 — 접수 → 전문가 판단 → 회신 → 해결 확인");
     await page.evaluate(() => localStorage.clear());
     await page.reload();
+    await dismissNotice(page);
 
     // 접수자: C-01 입력 + 장비 선택
     await page.click("#btn-new-issue");
@@ -242,6 +250,7 @@ async function clickOption(page, label) {
       window.FI_MEDIA.clear()
     ]));
     await page.reload();
+    await dismissNotice(page);
     await page.click("#btn-new-issue");
     await page.screenshot({ path: path.join(SHOT_DIR, "c01-voice.png"), fullPage: true });
 
